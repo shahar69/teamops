@@ -1,5 +1,5 @@
-<!doctype html><html><head><meta charset="utf-8"><title>User</title>
-<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} .wrap{padding:10px} textarea{width:100%;height:70px;background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px} button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin-top:8px} .card{background:#131a22;margin:10px 0;padding:10px;border-radius:10px}</style>
+<!doctype html><html><head><meta charset="utf-8"><title>My Space</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} .wrap{padding:14px} textarea{width:100%;height:70px;background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px} button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin-top:8px} .card{background:#131a22;margin:10px 0;padding:10px;border-radius:10px} small{opacity:.8}</style>
 <script>
 async function addNote(){
   const t=document.getElementById('n').value.trim(); if(!t) return;
@@ -7,11 +7,11 @@ async function addNote(){
   location.reload();
 }
 </script></head><body><div class="wrap">
-<h3>{{u.email}} <small>({{u.role}})</small></h3>
-<div>Viewer: {{viewer}}</div>
-<textarea id="n" placeholder="Add personal note..."></textarea>
+<h3>My Space</h3>
+<div>User: <b>{{u.email}}</b> <small>({{u.role}})</small></div>
+<textarea id="n" placeholder="Add a personal note..."></textarea>
 <button onclick="addNote()">Add</button>
-<h4>Recent Notes</h4>
+<h4>My Notes</h4>
 {% for c,dt in notes %}
   <div class="card"><div>{{c}}</div><small>{{dt}}</small></div>
 {% endfor %}

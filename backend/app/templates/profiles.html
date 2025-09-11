@@ -1,0 +1,39 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Cloud-init Profiles</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6;padding:14px}input,textarea{background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px;margin:4px}button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:6px;border-bottom:1px solid #1e2630}</style>
+<script>
+async function add(){
+  const name= p_name.value; if(!name) return alert('name required');
+  const body={name, ciuser:p_ciuser.value, cipassword:p_cipass.value, sshkeys:p_ssh.value, ipconfig0:p_ipcfg.value};
+  const r=await fetch('/api/profiles',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){ alert('failed'); return; } location.reload();
+}
+async function del(id){
+  if(!confirm('Delete profile?')) return;
+  const r=await fetch('/api/profiles/'+id,{method:'DELETE'});
+  if(!r.ok){ alert('failed'); return; } location.reload();
+}
+</script>
+</head><body>
+<h3>Cloud-init Profiles</h3>
+{% if role != 'leader' %}<div>Read-only (leader may edit)</div>{% endif %}
+<div>
+  <input id="p_name" placeholder="name">
+  <input id="p_ciuser" placeholder="ciuser (ubuntu)">
+  <input id="p_cipass" placeholder="cipassword">
+  <textarea id="p_ssh" placeholder="sshkeys"></textarea>
+  <input id="p_ipcfg" placeholder="ipconfig0 e.g. ip=192.168.1.50/24,gw=192.168.1.1">
+  {% if role == 'leader' %}<button onclick="add()">Add</button>{% endif %}
+</div>
+<table>
+<tr><th>Name</th><th>ciuser</th><th>ipconfig0</th><th>SSH</th><th>Actions</th></tr>
+{% for r in rows %}
+<tr>
+  <td>{{r.name}}</td>
+  <td>{{r.ciuser}}</td>
+  <td>{{r.ipconfig0}}</td>
+  <td style="max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{r.sshkeys}}</td>
+  <td>{% if role == 'leader' %}<button onclick="del('{{r.id}}')">Delete</button>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+</body></html>

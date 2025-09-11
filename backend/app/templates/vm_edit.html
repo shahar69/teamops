@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Edit VM {{vmid}}</title>
+<style>
+body{font-family:system-ui;background:#0b0f14;color:#e6e6e6;display:flex;align-items:center;justify-content:center;height:100vh}
+.card{background:#131a22;border-radius:12px;padding:18px;min-width:420px}
+input,textarea{width:100%;padding:10px;margin:6px 0;border-radius:8px;border:none;background:#0e1318;color:#fff}
+button{padding:10px 14px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;width:100%}
+</style>
+<script>
+async function save(){
+  const payload = {
+    name: document.getElementById('name').value,
+    cores: parseInt(document.getElementById('cores').value || 0),
+    memory: parseInt(document.getElementById('memory').value || 0),
+    description: document.getElementById('desc').value
+  };
+  const r = await fetch('/api/pve/qemu/{{node}}/{{vmid}}/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  if(!r.ok){ alert('Save failed: '+await r.text()); return; }
+  alert('Saved'); window.close();
+}
+</script>
+</head><body>
+<div class="card">
+  <h3>Edit VM {{vmid}}</h3>
+  <input id="name" placeholder="Name" value="{{cfg.name or ''}}">
+  <input id="cores" type="number" placeholder="Cores" value="{{cfg.cores or ''}}">
+  <input id="memory" type="number" placeholder="Memory (MB)" value="{{cfg.memory or ''}}">
+  <textarea id="desc" placeholder="Description">{{cfg.description or ''}}</textarea>
+  <button onclick="save()">Save</button>
+</div>
+</body></html>

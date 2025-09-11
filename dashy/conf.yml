@@ -10,77 +10,54 @@ appConfig:
 
 sections:
   - name: Overview
-    icon: fas fa-gauge
-    widgets:
-      - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/announcements
-          height: 260
-      - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/proxmox-summary
-          height: 260
-      - type: iframe
-        options:
-          url: http://status.liork.cloud/status
-          height: 520
+    icon: fas fa-house
+    items:
+      - title: Nextcloud
+        url: http://nextcloud.liork.cloud
+        icon: fas fa-cloud
+      - title: Status
+        url: http://status.liork.cloud
+        icon: fas fa-heartbeat
 
-  - name: Shahar
-    icon: fas fa-user-shield
+  - name: Team
+    icon: fas fa-bullhorn
     widgets:
       - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/user
-          height: 520
+        options: { url: http://backend.liork.cloud/ui/announcements, height: 520 }
 
-  - name: Oded
-    icon: fas fa-user-gear
+  - name: My Space
+    icon: fas fa-user
     widgets:
       - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/user
-          height: 520
-
-  - name: Orel
-    icon: fas fa-user-astronaut
-    widgets:
-      - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/user
-          height: 520
+        options: { url: http://backend.liork.cloud/ui/user, height: 520 }
 
   - name: Services
     icon: fas fa-server
     widgets:
       - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/proxmox-vms
-          height: 600
+        options: { url: http://backend.liork.cloud/ui/services, height: 760 }
 
-  - name: Calendar & Tasks
-    icon: fas fa-calendar-check
+  - name: Files & Tasks
+    icon: fas fa-folder-tree
     items:
-      - title: Team Calendar
+      - title: Files
+        url: http://nextcloud.liork.cloud/apps/files/
+        icon: fas fa-folder
+      - title: Calendar
         url: http://nextcloud.liork.cloud/apps/calendar/
         icon: fas fa-calendar
-        target: newtab
       - title: Deck (Kanban)
         url: http://nextcloud.liork.cloud/apps/deck/
         icon: fas fa-columns
-        target: newtab
-
-  - name: Files
-    icon: fas fa-folder-tree
-    items:
-      - title: Nextcloud Files
-        url: http://nextcloud.liork.cloud/apps/files/
-        icon: fas fa-cloud
-        target: newtab
 
   - name: Admin
     icon: fas fa-sliders
     widgets:
       - type: iframe
-        options:
-          url: http://backend.liork.cloud/ui/admin
-          height: 620
+        options: { url: http://backend.liork.cloud/ui/admin, height: 360 }
+      - type: iframe
+        options: { url: http://backend.liork.cloud/ui/audit, height: 320 }
+      - type: iframe
+        options: { url: http://backend.liork.cloud/ui/profiles, height: 520 }
+      - type: iframe
+        options: { url: http://backend.liork.cloud/ui/customers, height: 520 }

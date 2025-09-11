@@ -1,0 +1,70 @@
+<!doctype html><html><head><meta charset="utf-8"><title>VM {{vmid}}</title>
+<style>
+body{font-family:system-ui;background:#0b0f14;color:#e6e6e6;padding:14px}
+.card{background:#131a22;border-radius:12px;padding:14px;margin-bottom:12px}
+table{width:100%;border-collapse:collapse} th,td{padding:6px;border-bottom:1px solid #1e2630}
+button{padding:6px 10px;border:none;border-radius:6px;background:#1e90ff;color:#fff;cursor:pointer;margin:2px}
+.badge{background:#1e2630;padding:2px 6px;border-radius:6px}
+a{color:#89c2ff}
+</style>
+<script>
+async function snapCreate(){
+  const name = prompt('Snapshot name:', 'dash_' + Date.now());
+  if(!name) return;
+  const r = await fetch(`/api/pve/qemu/{{node}}/{{vmid}}/snapshot`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  if(!r.ok){ alert('Failed'); return; }
+  location.reload();
+}
+async function snapRollback(name){
+  if(!confirm('Rollback to '+name+' ?')) return;
+  const r = await fetch(`/api/pve/qemu/{{node}}/{{vmid}}/snapshot/${name}/rollback`, {method:'POST'});
+  if(!r.ok){ alert('Failed'); return; }
+  location.reload();
+}
+async function snapDelete(name){
+  if(!confirm('Delete snapshot '+name+' ?')) return;
+  const r = await fetch(`/api/pve/qemu/{{node}}/{{vmid}}/snapshot/${name}`, {method:'DELETE'});
+  if(!r.ok){ alert('Failed'); return; }
+  location.reload();
+}
+</script>
+</head><body>
+<div class="card">
+  <h3>VM {{vmid}} — {{cfg.name or vmid}}</h3>
+  <div>Status: <span class="badge">{{status.status}}</span> · QEMU</div>
+  <div>CPU: {{status.cpu*100|round(1)}}% · Mem: {{status.mem//(1024*1024)}} / {{status.maxmem//(1024*1024)}} MB</div>
+  <div>Node: {{node}} · Console: <a target="_blank" href="{{host}}/#v1:0:=node%2F{{node}}%2Fqemu%2F{{vmid}}">Open</a></div>
+</div>
+
+<div class="card">
+  <h4>Config</h4>
+  <table>
+    <tr><th>Name</th><td>{{cfg.name}}</td></tr>
+    <tr><th>Cores</th><td>{{cfg.cores}}</td></tr>
+    <tr><th>Memory</th><td>{{cfg.memory}} MB</td></tr>
+    <tr><th>Disk</th><td>{{cfg.scsi0}}</td></tr>
+    <tr><th>Net0</th><td>{{cfg.net0}}</td></tr>
+    <tr><th>Boot</th><td>{{cfg.boot}}</td></tr>
+    <tr><th>Desc</th><td>{{cfg.description}}</td></tr>
+  </table>
+  <p><a href="/ui/vm/{{node}}/{{vmid}}/edit" target="_blank">Edit config</a></p>
+</div>
+
+<div class="card">
+  <h4>Snapshots</h4>
+  <button onclick="snapCreate()">Create snapshot</button>
+  <table>
+    <tr><th>Name</th><th>VMState</th><th>Actions</th></tr>
+    {% for s in snaps %}
+    <tr>
+      <td>{{s.name}}</td>
+      <td>{{'stateful' if s.vmstate else 'disk-only'}}</td>
+      <td>
+        <button onclick="snapRollback('{{s.name}}')">Rollback</button>
+        <button onclick="snapDelete('{{s.name}}')">Delete</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+</body></html>

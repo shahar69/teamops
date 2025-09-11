@@ -1,0 +1,32 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Customers</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6;padding:14px}input,textarea{background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px;margin:4px}button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin:4px}table{width:100%;border-collapse:collapse;margin-top:12px}th,td{padding:6px;border-bottom:1px solid #1e2630}</style>
+<script>
+async function add(){
+  const name=c_name.value; if(!name) return alert('name required');
+  const r=await fetch('/api/customers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,contact:c_contact.value,notes:c_notes.value})});
+  if(!r.ok){ alert('failed'); return; } location.reload();
+}
+</script>
+</head><body>
+<h3>Customers</h3>
+<div>
+  <input id="c_name" placeholder="Name">
+  <input id="c_contact" placeholder="Contact">
+  <input id="c_notes" placeholder="Notes">
+  <button onclick="add()">Add</button>
+</div>
+<h4>Mappings</h4>
+<table>
+<tr><th>Node</th><th>VMID</th><th>Customer</th></tr>
+{% for m in maps %}
+<tr><td>{{m.node}}</td><td>{{m.vmid}}</td><td>{{m.name}}</td></tr>
+{% endfor %}
+</table>
+<h4>Customers</h4>
+<table>
+<tr><th>Name</th><th>Contact</th><th>Notes</th></tr>
+{% for c in customers %}
+<tr><td>{{c.name}}</td><td>{{c.contact}}</td><td>{{c.notes}}</td></tr>
+{% endfor %}
+</table>
+</body></html>

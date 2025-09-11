@@ -1,23 +1,16 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Admin</title>
-<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} .wrap{padding:10px} input{padding:8px;width:240px;border:none;border-radius:8px;background:#0e1318;color:#fff;margin:4px} button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin:4px}</style>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} .wrap{padding:14px} input{padding:8px;width:240px;border:none;border-radius:8px;background:#0e1318;color:#fff;margin:4px} button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin:4px} a{color:#89c2ff}</style>
 <script>
 async function ncCreate(){
   const u=document.getElementById('u').value, p=document.getElementById('p').value, d=document.getElementById('d').value;
   const r=await fetch('/api/nextcloud/users',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p,displayname:d})});
   alert(r.ok?'Created':'Error');
 }
-async function announce(){
-  const a=document.getElementById('ann').value.trim();
-  if(!a) return;
-  await fetch('/api/announcements',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:a})});
-  alert('Posted');
-}
 </script></head><body><div class="wrap">
 <h3>Admin Panel</h3>
-<h4>Post Announcement</h4>
-<input id="ann" placeholder="Message..."><button onclick="announce()">Send</button>
+<div><a href="/ui/logout">Logout</a> · <a href="/ui/audit" target="_blank">Audit</a> · <a href="/ui/profiles" target="_blank">Profiles</a> · <a href="/ui/customers" target="_blank">Customers</a></div>
 <h4>Create Nextcloud User</h4>
 <input id="u" placeholder="username"><input id="p" placeholder="password"><input id="d" placeholder="display name">
 <button onclick="ncCreate()">Create</button>
-<p><small>Use Nextcloud UI for groups/shares; Deck/Calendar live under nextcloud subdomain.</small></p>
+<p><small>Use Nextcloud UI for groups/shares. Deck/Calendar under Nextcloud.</small></p>
 </div></body></html>

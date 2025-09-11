@@ -1,4 +1,58 @@
+version: "3.9"
+
+networks:
+  teamops:
+    driver: bridge
+
+volumes:
+  db_data:
+  npm_data:
+  npm_letsencrypt:
+  kuma_data:
+  nextcloud_data:
+  nextcloud_db_data:
+
 services:
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: teamops
+      POSTGRES_USER: teamops
+      POSTGRES_PASSWORD: teamops-db-pass-STRONG
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks: [ teamops ]
+
+  backend:
+    build: ./backend
+    # (switch to an image later if you use GHCR)
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+psycopg2://teamops:teamops-db-pass-STRONG@db:5432/teamops
+      BACKEND_SECRET: super-secret-long-random
+      PVE_HOST: https://192.168.1.2:8006
+      PVE_TOKEN_ID: teamops@pve!dash
+      PVE_TOKEN_SECRET: your-proxmox-token-secret
+      NEXTCLOUD_BASE: http://nextcloud
+      NEXTCLOUD_ADMIN: admin
+      NEXTCLOUD_ADMIN_PASS: change-me
+      KUMA_URL: http://kuma:3001
+      KUMA_TOKEN: ""
+    depends_on: [ db ]
+    ports:
+      - "8000:8000"
+    networks: [ teamops ]
+
+  dashy:
+    image: lissy93/dashy:2.1.1
+    restart: unless-stopped
+    volumes:
+      - ./dashy/conf.yml:/app/user-data/conf.yml
+    networks: [ teamops ]
+    # no ports here; expose via NPM at dashboard.liork.cloud
+
   npm:
     image: jc21/nginx-proxy-manager:2.11.3
     restart: unless-stopped
@@ -9,114 +63,45 @@ services:
     volumes:
       - npm_data:/data
       - npm_letsencrypt:/etc/letsencrypt
-    networks:
-      - teamops
-
-  dashy:
-    image: lissy93/dashy:2.1.1
-    restart: unless-stopped
-    environment:
-      - NODE_ENV=production
-    volumes:
-      - ./dashy/conf.yml:/app/public/conf.yml
-    depends_on:
-      - backend
-      - kuma
-    networks:
-      - teamops
+    networks: [ teamops ]
 
   kuma:
     image: louislam/uptime-kuma:1
     restart: unless-stopped
     environment:
-      - DISABLE_FRAME_SAMEORIGIN=true   # <— allow embedding in Dashy iframe
+      - DISABLE_FRAME_SAMEORIGIN=true
     volumes:
       - kuma_data:/app/data
-    networks:
-      - teamops
+    networks: [ teamops ]
+    # expose via NPM at status.liork.cloud
 
-  db:
-    image: postgres:16
+  nextcloud_db:
+    image: mariadb:11
     restart: unless-stopped
     environment:
-      - POSTGRES_DB=${POSTGRES_DB}
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ncroot-pass-STRONG
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: nextcloud-pass-STRONG
     volumes:
-      - db_data:/var/lib/postgresql/data
-    networks:
-      - teamops
+      - nextcloud_db_data:/var/lib/mysql
+    networks: [ teamops ]
 
-  backend:
-    build: ./backend
+  nextcloud_redis:
+    image: redis:7-alpine
     restart: unless-stopped
-    environment:
-      - BACKEND_SECRET=${BACKEND_SECRET}
-      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      - PVE_HOST=${PVE_HOST}
-      - PVE_TOKEN_ID=${PVE_TOKEN_ID}
-      - PVE_TOKEN_SECRET=${PVE_TOKEN_SECRET}
-      - SMTP_HOST=${SMTP_HOST}
-      - SMTP_PORT=${SMTP_PORT}
-      - SMTP_USER=${SMTP_USER}
-      - SMTP_PASS=${SMTP_PASS}
-      - SMTP_FROM=${SMTP_FROM}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - NEXTCLOUD_BASE=http://nextcloud
-      - NEXTCLOUD_ADMIN=${NC_ADMIN_USER}
-      - NEXTCLOUD_ADMIN_PASS=${NC_ADMIN_PASS}
-    ports:
-      - "8000:8000"
-    depends_on:
-      - db
-    networks:
-      - teamops
+    networks: [ teamops ]
 
   nextcloud:
     image: nextcloud:29-apache
     restart: unless-stopped
     environment:
-      - NEXTCLOUD_ADMIN_USER=${NC_ADMIN_USER}
-      - NEXTCLOUD_ADMIN_PASSWORD=${NC_ADMIN_PASS}
-      - NEXTCLOUD_TRUSTED_DOMAINS=${NEXTCLOUD_FQDN} nextcloud
+      MYSQL_HOST: nextcloud_db
+      MYSQL_DATABASE: nextcloud
+      MYSQL_USER: nextcloud
+      MYSQL_PASSWORD: nextcloud-pass-STRONG
+      REDIS_HOST: nextcloud_redis
+    depends_on: [ nextcloud_db, nextcloud_redis ]
     volumes:
       - nextcloud_data:/var/www/html
-    depends_on:
-      - nextcloud_db
-      - nextcloud_redis
-    networks:
-      - teamops
-
-  nextcloud_db:
-    image: mariadb:11
-    command: --transaction-isolation=READ-COMMITTED --binlog-format=ROW
-    restart: unless-stopped
-    environment:
-      - MARIADB_DATABASE=nextcloud
-      - MARIADB_USER=nextcloud
-      - MARIADB_PASSWORD=${POSTGRES_PASSWORD}
-      - MARIADB_ROOT_PASSWORD=${POSTGRES_PASSWORD}
-    volumes:
-      - nextcloud_db_data:/var/lib/mysql
-    networks:
-      - teamops
-
-  nextcloud_redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    networks:
-      - teamops
-
-volumes:
-  npm_data:
-  npm_letsencrypt:
-  kuma_data:
-  db_data:
-  nextcloud_data:
-  nextcloud_db_data:
-
-networks:
-  teamops:
-    driver: bridge
+    networks: [ teamops ]

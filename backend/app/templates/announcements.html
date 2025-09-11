@@ -1,5 +1,5 @@
-<!doctype html><html><head><meta charset="utf-8"><title>Announcements</title>
-<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} .wrap{padding:10px} textarea{width:100%;height:80px;background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px} button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin-top:8px} .card{background:#131a22;margin:10px 0;padding:10px;border-radius:10px}</style>
+<!doctype html><html><head><meta charset="utf-8"><title>Team</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} .wrap{padding:14px} textarea{width:100%;height:80px;background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px} button{padding:8px 12px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;margin-top:8px} .card{background:#131a22;margin:10px 0;padding:10px;border-radius:10px} small{opacity:.8}</style>
 <script>
 async function postAnn(){
   const txt = document.getElementById('a').value.trim();
@@ -8,9 +8,9 @@ async function postAnn(){
   location.reload();
 }
 </script></head><body><div class="wrap">
-<h3>Announcements</h3>
-<div>Signed in as <b>{{email}}</b> · <a href="/ui/login">Switch</a></div>
-<textarea id="a" placeholder="Post an announcement..."></textarea>
+<h3>Team Announcements</h3>
+<div>Signed in as <b>{{email}}</b> · <a href="/ui/logout">Logout</a></div>
+<textarea id="a" placeholder="Post an announcement to the team..."></textarea>
 <button onclick="postAnn()">Publish</button>
 {% for c,e,dt in anns %}
   <div class="card"><div>{{c}}</div><small>by {{e}} · {{dt}}</small></div>

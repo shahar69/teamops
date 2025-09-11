@@ -1,0 +1,223 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Services</title>
+<style>
+body{font-family:system-ui;background:#0b0f14;color:#e6e6e6}
+.wrap{padding:14px}
+input,select{background:#0e1318;color:#fff;border:none;border-radius:8px;padding:8px;margin:4px}
+button{padding:6px 10px;border:none;border-radius:6px;background:#1e90ff;color:#fff;cursor:pointer}
+table{width:100%;border-collapse:collapse;margin-top:8px}
+th,td{padding:6px;border-bottom:1px solid #1e2630}
+.badge{background:#1e2630;padding:2px 6px;border-radius:6px}
+.actions button{margin:0 2px}
+.modal{position:fixed;inset:0;background:#0008;display:none;align-items:center;justify-content:center}
+.card{background:#131a22;border-radius:12px;padding:16px;min-width:420px}
+.card h4{margin:6px 0 10px}
+.row{display:flex;gap:8px}
+.row>*{flex:1}
+a{color:#89c2ff}
+small{opacity:.8}
+</style>
+<script>
+function show(id){document.getElementById(id).style.display='flex'}
+function hide(id){document.getElementById(id).style.display='none'}
+function filt(){
+  const q = document.getElementById('q').value.toLowerCase();
+  const t = document.getElementById('ftype').value;
+  const s = document.getElementById('fstat').value;
+  for(const r of document.querySelectorAll('tbody tr')){
+    const name = r.dataset.name, vmid=r.dataset.vmid, type=r.dataset.type, status=r.dataset.status;
+    let showRow = true;
+    if(q && !(name.includes(q) || vmid.includes(q))) showRow=false;
+    if(t && t!==type) showRow=false;
+    if(s && s!==status) showRow=false;
+    r.style.display = showRow?'':'none';
+  }
+}
+async function act(kind,node,vmid,action){
+  if(!confirm(action.toUpperCase() + ' ' + kind.toUpperCase() +' '+vmid+'?')) return;
+  const r = await fetch(`/api/pve/${kind}/${node}/${vmid}/${action}`, {method:'POST'});
+  if(!r.ok){ alert('Failed: '+(await r.text())); return; }
+  setTimeout(()=>location.reload(), 900);
+}
+function viewVM(node, vmid){ window.open(`/ui/vm/${node}/${vmid}`,'_blank'); }
+function editVM(node, vmid){ window.open(`/ui/vm/${node}/${vmid}/edit`,'_blank'); }
+
+async function loadSelectors(){
+  const nodes = await (await fetch('/api/pve/nodes')).json();
+  for(const id of ['c_node','l_node','clone_node']) {
+    const sel = document.getElementById(id); sel.innerHTML = nodes.map(n=>`<option>${n.node}</option>`).join('');
+  }
+  await refreshNodeDeps('c_'); await refreshNodeDeps('l_'); await refreshNodeDeps('clone_');
+}
+async function refreshNodeDeps(prefix){
+  const node = document.getElementById(prefix+'node').value;
+  if(prefix==='l_'){ // LXC
+    const stores = await (await fetch(`/api/pve/${node}/storages`)).json();
+    document.getElementById('l_storage').innerHTML = stores.map(s=>`<option>${s.storage}</option>`).join('');
+    const tmpl = await (await fetch(`/api/pve/${node}/storage/${stores[0].storage}/content?content=vztmpl`)).json();
+    document.getElementById('l_template').innerHTML = tmpl.map(i=>`<option value="${i.volid}">${i.volid}</option>`).join('');
+    const bridges = await (await fetch(`/api/pve/${node}/bridges`)).json();
+    document.getElementById('l_bridge').innerHTML = bridges.map(b=>`<option>${b.iface}</option>`).join('');
+    return;
+  }
+  const stores = await (await fetch(`/api/pve/${node}/storages`)).json();
+  document.getElementById(prefix+'storage').innerHTML = stores.map(s=>`<option>${s.storage}</option>`).join('');
+  const bridges = await (await fetch(`/api/pve/${node}/bridges`)).json();
+  document.getElementById(prefix+'bridge').innerHTML = bridges.map(b=>`<option>${b.iface}</option>`).join('');
+  if(prefix==='c_'){
+    const isos = await (await fetch(`/api/pve/${node}/storage/${stores[0].storage}/content?content=iso`)).json();
+    document.getElementById('c_iso').innerHTML = `<option value="">(none)</option>` + isos.map(i=>`<option value="${i.volid}">${i.volid}</option>`).join('');
+  }
+}
+async function nextId(tgt){ const j = await (await fetch('/api/pve/nextid')).json(); document.getElementById(tgt).value=j.vmid; }
+
+async function submitCreateVM(){
+  const p = {
+    node: c_node.value, name: c_name.value, vmid: c_vmid.value,
+    memory: c_mem.value, cores: c_cores.value, storage: c_storage.value,
+    disk_gb: c_disk.value, bridge: c_bridge.value, iso: c_iso.value,
+    cloudinit: c_ci.checked, ciuser: c_ciuser.value, cipassword: c_cipass.value,
+    sshkeys: c_ssh.value, ipconfig0: c_ipcfg.value
+  };
+  if(!p.name){ alert('Name required'); return; }
+  const r = await fetch('/api/pve/qemu/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+  if(!r.ok){ alert('Create failed: '+await r.text()); return; }
+  alert('VM created'); hide('modalCreateVM'); location.reload();
+}
+
+async function submitCreateLXC(){
+  const p = {
+    node: l_node.value, hostname: l_hostname.value, vmid: l_vmid.value,
+    password: l_pass.value, storage: l_storage.value, disk_gb: l_disk.value,
+    template: l_template.value, bridge: l_bridge.value,
+    ip: l_ip.value, memory: l_mem.value
+  };
+  if(!p.hostname){ alert('Hostname required'); return; }
+  const r = await fetch('/api/pve/lxc/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+  if(!r.ok){ alert('Create failed: '+await r.text()); return; }
+  alert('LXC created'); hide('modalCreateLXC'); location.reload();
+}
+
+async function openClone(node, vmid){
+  clone_vmid_from.value = vmid;
+  clone_node_from.value = node;
+  show('modalClone');
+}
+async function submitClone(){
+  const p = { newid: clone_vmid.value, name: clone_name.value, target: clone_node.value, storage: clone_storage.value, full: clone_full.checked };
+  const nodeFrom = clone_node_from.value, vmidFrom = clone_vmid_from.value;
+  const r = await fetch(`/api/pve/qemu/${nodeFrom}/${vmidFrom}/clone`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+  if(!r.ok){ alert('Clone failed: '+await r.text()); return; }
+  alert('Clone started'); hide('modalClone'); location.reload();
+}
+
+async function addMonitor(url, name){
+  const r = await fetch('/api/kuma/monitor',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url, name})});
+  if(!r.ok){ alert('Kuma add failed: '+await r.text()); return; }
+  alert('Monitor added');
+}
+
+async function mapCustomer(node, vmid){
+  const cust = prompt('Customer name:'); if(!cust) return;
+  const r = await fetch('/api/customers/map',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node,vmid,customer:cust})});
+  if(!r.ok){ alert('Map failed: '+await r.text()); return; }
+  alert('Mapped'); location.reload();
+}
+</script>
+</head><body onload="loadSelectors()"><div class="wrap">
+<div class="row">
+  <h3 style="flex:1">Services</h3>
+  <div>
+    <button onclick="show('modalCreateVM')">+ Create VM</button>
+    <button onclick="show('modalCreateLXC')">+ Create LXC</button>
+  </div>
+</div>
+<div>
+  <input id="q" placeholder="Search name or VMID" oninput="filt()">
+  <select id="ftype" onchange="filt()">
+    <option value="">Type: All</option>
+    <option value="qemu">VM (qemu)</option>
+    <option value="lxc">Container (lxc)</option>
+  </select>
+  <select id="fstat" onchange="filt()">
+    <option value="">Status: All</option>
+    <option value="running">Running</option>
+    <option value="stopped">Stopped</option>
+  </select>
+</div>
+<table>
+<thead><tr><th>Node</th><th>Type</th><th>VMID</th><th>Name</th><th>Status</th><th>Customer</th><th>Actions</th><th>Console</th></tr></thead>
+<tbody>
+{% for v in vms %}
+{% set key = (v.node, v.vmid|int) %}
+<tr data-name="{{(v.name or v.vmid)|string|lower}}" data-vmid="{{v.vmid}}" data-type="{{v.type}}" data-status="{{v.status}}">
+  <td>{{v.node}}</td>
+  <td>{{v.type}}</td>
+  <td>{{v.vmid}}</td>
+  <td>{{v.name or v.vmid}}</td>
+  <td><span class="badge">{{v.status}}</span></td>
+  <td>{{ cust_map.get(key,'-') }} <a href="javascript:void(0)" onclick="mapCustomer('{{v.node}}','{{v.vmid}}')">[map]</a></td>
+  <td class="actions">
+    <button onclick="viewVM('{{v.node}}','{{v.vmid}}')">View</button>
+    {% if v.type=='qemu' %}<button onclick="editVM('{{v.node}}','{{v.vmid}}')">Edit</button>{% endif %}
+    {% set p = perms.get(key, {'can_power': True, 'can_snapshot': False}) %}
+    {% if p.can_power %}
+      <button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','start')">Start</button>
+      <button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','shutdown')">Shutdown</button>
+      <button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','stop')">Stop</button>
+      <button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','reboot')">Reboot</button>
+    {% endif %}
+    {% if v.type=='qemu' %}
+      <button onclick="openClone('{{v.node}}','{{v.vmid}}')">Clone</button>
+    {% endif %}
+    <button onclick="addMonitor('http://'+('{{v.name}}' || '{{v.vmid}}')+'.liork.cloud','VM {{v.vmid}}')">+Monitor</button>
+  </td>
+  <td><a target="_blank" href="{{host}}/#v1:0:=node%2F{{v.node}}%2F{{'qemu' if v.type=='qemu' else 'lxc'}}%2F{{v.vmid}}">Open</a></td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+
+<!-- Create VM -->
+<div id="modalCreateVM" class="modal" onclick="if(event.target===this)hide('modalCreateVM')">
+  <div class="card">
+    <h4>Create VM (QEMU)</h4>
+    <div class="row"><select id="c_node" onchange="refreshNodeDeps('c_')"></select><input id="c_name" placeholder="Name"></div>
+    <div class="row"><input id="c_vmid" placeholder="VMID (blank=auto)"><button onclick="nextId('c_vmid')">Next ID</button></div>
+    <div class="row"><input id="c_mem" type="number" value="2048" placeholder="Memory (MB)"><input id="c_cores" type="number" value="2" placeholder="Cores"></div>
+    <div class="row"><select id="c_storage" onchange="refreshNodeDeps('c_')"></select><input id="c_disk" type="number" value="20" placeholder="Disk GB"></div>
+    <div class="row"><select id="c_bridge"></select><select id="c_iso"></select></div>
+    <div><label><input type="checkbox" id="c_ci"> Use cloud-init</label></div>
+    <div class="row"><input id="c_ciuser" placeholder="ciuser (ubuntu)"><input id="c_cipass" placeholder="cipassword"></div>
+    <div class="row"><input id="c_ssh" placeholder="sshkeys"></div>
+    <div class="row"><input id="c_ipcfg" placeholder="ipconfig0 e.g. ip=192.168.1.50/24,gw=192.168.1.1"></div>
+    <div class="row"><button onclick="submitCreateVM()">Create</button><button onclick="hide('modalCreateVM')">Cancel</button></div>
+  </div>
+</div>
+
+<!-- Create LXC -->
+<div id="modalCreateLXC" class="modal" onclick="if(event.target===this)hide('modalCreateLXC')">
+  <div class="card">
+    <h4>Create LXC</h4>
+    <div class="row"><select id="l_node" onchange="refreshNodeDeps('l_')"></select><input id="l_hostname" placeholder="Hostname"></div>
+    <div class="row"><input id="l_vmid" placeholder="VMID (blank=auto)"><button onclick="nextId('l_vmid')">Next ID</button></div>
+    <div class="row"><input id="l_mem" type="number" value="1024" placeholder="Memory (MB)"><input id="l_disk" type="number" value="8" placeholder="Disk GB"></div>
+    <div class="row"><select id="l_storage"></select><select id="l_template"></select></div>
+    <div class="row"><select id="l_bridge"></select><input id="l_ip" placeholder="ip (dhcp or ip/cidr,gw=...)"></div>
+    <div class="row"><input id="l_pass" type="password" placeholder="root password"></div>
+    <div class="row"><button onclick="submitCreateLXC()">Create</button><button onclick="hide('modalCreateLXC')">Cancel</button></div>
+  </div>
+</div>
+
+<!-- Clone VM -->
+<div id="modalClone" class="modal" onclick="if(event.target===this)hide('modalClone')">
+  <div class="card">
+    <h4>Clone VM</h4>
+    <div class="row"><input id="clone_node_from" disabled><input id="clone_vmid_from" disabled></div>
+    <div class="row"><select id="clone_node" onchange="refreshNodeDeps('clone_')"></select><input id="clone_name" placeholder="New name"></div>
+    <div class="row"><input id="clone_vmid" placeholder="New VMID (blank=auto)"><button onclick="nextId('clone_vmid')">Next ID</button></div>
+    <div class="row"><select id="clone_storage"></select><label><input type="checkbox" id="clone_full" checked> Full clone</label></div>
+    <div class="row"><button onclick="submitClone()">Clone</button><button onclick="hide('modalClone')">Cancel</button></div>
+  </div>
+</div>
+
+</div></body></html>
