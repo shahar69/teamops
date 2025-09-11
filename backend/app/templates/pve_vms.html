@@ -1,0 +1,33 @@
+<!doctype html><html><head><meta charset="utf-8"><title>VM Control</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} table{width:100%;border-collapse:collapse} th,td{padding:6px;border-bottom:1px solid #1e2630} button{padding:4px 8px;margin:2px;border:none;border-radius:6px;background:#1e90ff;color:#fff;cursor:pointer}</style>
+<script>
+async function act(kind,node,vmid,action){
+  await fetch(`/api/pve/${kind}/${node}/${vmid}/${action}`,{method:'POST'});
+  setTimeout(()=>location.reload(), 800);
+}
+</script>
+</head><body>
+<h3>Customer VM Control</h3>
+<table>
+<tr><th>Node</th><th>Type</th><th>VMID</th><th>Name</th><th>Status</th><th>Actions</th><th>Console</th></tr>
+{% for v in vms %}
+<tr>
+<td>{{v.node}}</td>
+<td>{{v.type}}</td>
+<td>{{v.vmid}}</td>
+<td>{{v.name or v.vmid}}</td>
+<td>{{v.status}}</td>
+<td>
+<button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','start')">Start</button>
+<button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','shutdown')">Shutdown</button>
+<button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','stop')">Stop</button>
+<button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','reboot')">Reboot</button>
+<button onclick="act('{{v.type}}','{{v.node}}','{{v.vmid}}','snapshot')">Snapshot</button>
+</td>
+<td>
+<a target="_blank" href="{{host}}/#v1:0:=node%2F{{v.node}}%2F{{'qemu' if v.type=='qemu' else 'lxc'}}%2F{{v.vmid}}">Open</a>
+</td>
+</tr>
+{% endfor %}
+</table>
+</body></html>

@@ -1,0 +1,11 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Login</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6;display:flex;align-items:center;justify-content:center;height:100vh}form{background:#131a22;padding:24px;border-radius:12px;min-width:320px}input{width:100%;padding:10px;margin:6px 0;border-radius:8px;border:none;background:#0e1318;color:#fff}button{padding:10px 14px;border:none;border-radius:8px;background:#1e90ff;color:#fff;cursor:pointer;width:100%}.err{color:#ff6b6b;margin-bottom:8px;text-align:center}</style>
+</head><body>
+<form method="post" action="/ui/login">
+<h3>TeamOps Login</h3>
+{% if error %}<div class="err">{{error}}</div>{% endif %}
+<input name="email" type="email" placeholder="Email" required>
+<input name="password" type="password" placeholder="Password" required>
+<button>Sign in</button>
+</form>
+</body></html>

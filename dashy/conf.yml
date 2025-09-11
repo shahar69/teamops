@@ -1,0 +1,86 @@
+pageInfo:
+  title: Team Ops - liork.cloud
+  description: Unified control center for Shahar | Oded | Orel
+  footerText: "עם ישראל חי · Internal Use Only"
+
+appConfig:
+  theme: dark
+  layout: horizontal
+  hideSettings: true
+
+sections:
+  - name: Overview
+    icon: fas fa-gauge
+    widgets:
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/announcements
+          height: 260
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/proxmox-summary
+          height: 260
+      - type: iframe
+        options:
+          url: http://status.liork.cloud/status
+          height: 520
+
+  - name: Shahar
+    icon: fas fa-user-shield
+    widgets:
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/user
+          height: 520
+
+  - name: Oded
+    icon: fas fa-user-gear
+    widgets:
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/user
+          height: 520
+
+  - name: Orel
+    icon: fas fa-user-astronaut
+    widgets:
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/user
+          height: 520
+
+  - name: Services
+    icon: fas fa-server
+    widgets:
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/proxmox-vms
+          height: 600
+
+  - name: Calendar & Tasks
+    icon: fas fa-calendar-check
+    items:
+      - title: Team Calendar
+        url: http://nextcloud.liork.cloud/apps/calendar/
+        icon: fas fa-calendar
+        target: newtab
+      - title: Deck (Kanban)
+        url: http://nextcloud.liork.cloud/apps/deck/
+        icon: fas fa-columns
+        target: newtab
+
+  - name: Files
+    icon: fas fa-folder-tree
+    items:
+      - title: Nextcloud Files
+        url: http://nextcloud.liork.cloud/apps/files/
+        icon: fas fa-cloud
+        target: newtab
+
+  - name: Admin
+    icon: fas fa-sliders
+    widgets:
+      - type: iframe
+        options:
+          url: http://backend.liork.cloud/ui/admin
+          height: 620

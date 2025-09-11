@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Docker volumes and logs
+*.log
+**/node_modules/
+dashy/node_modules/
+npm_data/
+npm_letsencrypt/
+kuma_data/
+db_data/
+nextcloud_data/
+nextcloud_db_data/
+
+# Local env
+.env
+.env.*
+secrets/
+.DS_Store

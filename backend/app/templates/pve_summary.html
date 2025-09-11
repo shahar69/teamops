@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta charset="utf-8"><title>PVE Summary</title>
+<style>body{font-family:system-ui;background:#0b0f14;color:#e6e6e6} table{width:100%;border-collapse:collapse} th,td{padding:6px;border-bottom:1px solid #1e2630} .tag{background:#1e2630;padding:2px 6px;border-radius:6px}</style>
+</head><body>
+<h3>Proxmox Summary</h3>
+<table>
+<tr><th>Node</th><th>CPU</th><th>Mem Used</th><th>Uptime</th></tr>
+{% for n in nodes %}
+<tr>
+<td>{{n.node}}</td>
+<td>{{(n.cpu*100)|round(1)}}%</td>
+<td>{{(n.memory - n.memfree)//(1024*1024)}} / {{n.maxmem//(1024*1024)}} MB</td>
+<td>{{n.uptime}} s</td>
+</tr>
+{% endfor %}
+</table>
+<h4>Guests</h4>
+<table>
+<tr><th>Node</th><th>VMID</th><th>Name</th><th>Status</th><th>Type</th></tr>
+{% for g in guests %}
+<tr>
+<td>{{g.node}}</td>
+<td>{{g.vmid}}</td>
+<td>{{g.name or g.vmid}}</td>
+<td><span class="tag">{{g.status}}</span></td>
+<td>{{g.type if g.type else ('qemu' if g.maxdisk else 'lxc')}}</td>
+</tr>
+{% endfor %}
+</table>
+<p><small>Console: {{host}}</small></p>
+</body></html>
