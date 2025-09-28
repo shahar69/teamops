@@ -193,6 +193,7 @@ def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
             "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations.",
             note,
         )
+main
     try:
         url = AI_API_BASE.rstrip('/') + "/chat/completions"
         headers = {
