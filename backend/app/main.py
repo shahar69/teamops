@@ -424,6 +424,64 @@ async def api_vm_create(req: Request, payload: dict):
     audit(email, "pve:create", {"node":node,"vmid":vmid,"name":name})
     return {"ok": True, "vmid": vmid}
 
+@app.post("/api/pve/qemu/create/crew")
+async def api_vm_create_crew(req: Request, payload: dict):
+    uid, email, role = require_user(req)
+    if role != "leader":
+        raise HTTPException(403, "leader only")
+    vmid = int(payload.get("vmid") or (await pve_get("/cluster/nextid")))
+    name = payload.get("name", "crew-software")
+    try:
+        node = payload.get("node")
+        if not node:
+            nodes = await pve_get("/nodes")
+            if not nodes:
+                raise HTTPException(400, "no proxmox nodes available")
+            node = nodes[0]["node"]
+        storage = payload.get("storage", "local-lvm")
+        bridge = payload.get("bridge", "vmbr0")
+        memory = int(payload.get("memory") or 4096)
+        cores = int(payload.get("cores") or 4)
+        disk_gb = int(payload.get("disk_gb") or 60)
+        ip_cidr = payload.get("ip", "192.168.1.20/24")
+        gateway = payload.get("gateway", "192.168.1.1")
+        ciuser = payload.get("ciuser", "crew")
+        cipassword = payload.get("cipassword", "")
+        sshkeys = payload.get("sshkeys", "")
+        ipconfig0 = payload.get("ipconfig0") or f"ip={ip_cidr},gw={gateway}"
+    except ValueError:
+        raise HTTPException(400, "invalid numeric value")
+    post_data = {
+        "vmid": vmid,
+        "name": name,
+        "memory": memory,
+        "cores": cores,
+        "scsihw": "virtio-scsi-pci",
+        "ostype": "l26",
+        "agent": 1,
+        "net0": f"virtio,bridge={bridge}",
+        "scsi0": f"{storage}:{disk_gb}",
+        "ide2": "local:cloudinit",
+        "boot": "order=scsi0;ide2;net0",
+        "ciuser": ciuser,
+        "ipconfig0": ipconfig0,
+    }
+    if cipassword:
+        post_data["cipassword"] = cipassword
+    if sshkeys:
+        post_data["sshkeys"] = sshkeys
+    try:
+        await pve_post(f"/nodes/{node}/qemu", post_data)
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"pve error: {e}")
+    audit(email, "pve:create_crew", {
+        "node": node,
+        "vmid": vmid,
+        "name": name,
+        "ip": ipconfig0,
+    })
+    return {"ok": True, "vmid": vmid}
+
 @app.post("/api/pve/qemu/{node}/{vmid}/clone")
 async def api_vm_clone(req: Request, node: str, vmid: int, payload: dict):
     uid, email, role = require_user(req)
