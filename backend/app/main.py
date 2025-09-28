@@ -188,9 +188,12 @@ def audit(email: str, action: str, meta: dict):
 def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
     if not AI_API_KEY:
         note = "AI provider is not configured. Set OPENAI_API_KEY to enable live generations."
-        return "needs_config", (
-            "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations."
-        ), note
+        return (
+            "needs_config",
+            "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations.",
+            note,
+        )
+main
     try:
         url = AI_API_BASE.rstrip('/') + "/chat/completions"
         headers = {
