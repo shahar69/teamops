@@ -5,6 +5,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Plai
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import IntegrityError
 from passlib.hash import bcrypt
 import httpx
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
@@ -23,6 +24,11 @@ NC_ADMIN_PASS = os.environ.get("NEXTCLOUD_ADMIN_PASS","admin")
 
 KUMA_URL = os.environ.get("KUMA_URL", "http://kuma:3001")
 KUMA_TOKEN = os.environ.get("KUMA_TOKEN", "")
+
+AI_MODEL = os.environ.get("AI_MODEL", "gpt-4o-mini")
+AI_API_BASE = os.environ.get("AI_API_BASE", "https://api.openai.com/v1")
+AI_API_KEY = os.environ.get("AI_API_KEY", "")
+AI_TIMEOUT = float(os.environ.get("AI_TIMEOUT", "45"))
 
 # ---------- DB ----------
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -100,6 +106,30 @@ def init_db():
             customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
             PRIMARY KEY(node, vmid)
         );
+        CREATE TABLE IF NOT EXISTS ai_content_profiles(
+            id SERIAL PRIMARY KEY,
+            name TEXT UNIQUE NOT NULL,
+            tone TEXT,
+            voice TEXT,
+            target_platform TEXT,
+            guidelines TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS ai_content_jobs(
+            id SERIAL PRIMARY KEY,
+            profile_id INTEGER REFERENCES ai_content_profiles(id) ON DELETE SET NULL,
+            title TEXT NOT NULL,
+            keywords TEXT,
+            brief TEXT,
+            data_sources TEXT,
+            content_type TEXT,
+            generated_content TEXT,
+            status TEXT NOT NULL DEFAULT 'draft',
+            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
         """))
 init_db()
 
@@ -154,6 +184,119 @@ def audit(email: str, action: str, meta: dict):
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO audit(actor_email,action,meta) VALUES (:e,:a,:m)"),
                      {"e":email, "a":action, "m":json.dumps(meta)})
+
+def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
+    if not AI_API_KEY:
+        note = "AI provider is not configured. Set OPENAI_API_KEY to enable live generations."
+        return (
+            "needs_config",
+            "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations.",
+            note,
+        )
+    try:
+        url = AI_API_BASE.rstrip('/') + "/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {AI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": AI_MODEL,
+            "messages": messages,
+            "temperature": 0.65,
+        }
+        resp = httpx.post(url, headers=headers, json=payload, timeout=AI_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            raise HTTPException(502, "AI provider returned no completions")
+        content = choices[0].get("message", {}).get("content", "").strip()
+        if not content:
+            raise HTTPException(502, "AI provider returned empty content")
+        note = f"Generated via {AI_MODEL}"
+        return "ready", content, note
+    except httpx.HTTPStatusError as e:
+        print(f"[AI ERROR] status {e.response.status_code}: {e.response.text[:200]}", file=sys.stderr)
+        raise HTTPException(502, "AI provider error")
+    except httpx.HTTPError as e:
+        print(f"[AI ERROR] http {e}", file=sys.stderr)
+        raise HTTPException(502, "AI request failed")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[AI ERROR] unexpected {e}", file=sys.stderr)
+        raise HTTPException(500, "AI request failed")
+
+def format_profile(row) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "tone": row.tone or "",
+        "voice": row.voice or "",
+        "target_platform": row.target_platform or "",
+        "guidelines": row.guidelines or "",
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+def format_job(row) -> dict:
+    return {
+        "id": row.id,
+        "profile_id": row.profile_id,
+        "profile_name": row.profile_name or "",
+        "title": row.title,
+        "keywords": row.keywords or "",
+        "brief": row.brief or "",
+        "data_sources": row.data_sources or "",
+        "content_type": row.content_type or "",
+        "generated_content": row.generated_content or "",
+        "status": row.status,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+CONTENT_BLUEPRINTS = {
+    "social-post": "Craft a set of 3 platform-ready social media posts (TikTok, Instagram Reels, Twitter/X). Each should have a hook, supporting body, and CTA. Include relevant hashtags.",
+    "reddit-story": "Write a first-person Reddit-style storytelling post with a captivating title, clear conflict, and satisfying resolution. Keep it authentic and emotionally engaging.",
+    "video-script": "Develop a short-form video script with sections: Hook, Scene Beats, Voiceover, On-screen text, CTA. Keep pacing fast and visual cues clear.",
+}
+
+def build_ai_messages(profile: dict, title: str, content_type: str, keywords: str, brief: str, data_sources: str, extra: str) -> List[dict]:
+    system = (
+        "You are an elite content automation assistant specialized in creating viral, monetizable narratives. "
+        "Always respect the provided tone, target platform, and brand voice. Ensure outputs are ready to copy/paste."
+    )
+    tone_line = f"Preferred tone: {profile['tone']}" if profile.get("tone") else ""
+    voice_line = f"Voice: {profile['voice']}" if profile.get("voice") else ""
+    platform_line = f"Target platform(s): {profile['target_platform']}" if profile.get("target_platform") else ""
+    guidelines = profile.get("guidelines") or ""
+    blueprint = CONTENT_BLUEPRINTS.get(content_type, "Deliver a polished narrative optimized for engagement and monetization.")
+    user_prompt = f"""
+Project Title: {title}
+Content focus: {blueprint}
+
+Keywords / SEO focus: {keywords or 'n/a'}
+Creative brief:
+{brief or '(none)'}
+
+Supporting data sources or context:
+{data_sources or '(none)'}
+
+Additional operator instructions:
+{extra or '(none)'}
+
+Deliver the final asset in Markdown. Provide:
+- A punchy title or hook
+- Main body content according to the content focus
+- Three platform-specific captions with hashtags
+- Suggested visual or audio cues when relevant
+- Monetization or CTA ideas at the end
+"""
+    sys_msg = "\n".join([line for line in [system, tone_line, voice_line, platform_line, guidelines] if line])
+    return [
+        {"role": "system", "content": sys_msg},
+        {"role": "user", "content": user_prompt.strip()},
+    ]
 
 # ---------- Bootstrap users ----------
 @app.post("/admin/init")
@@ -245,6 +388,231 @@ def add_note(req: Request, payload: dict):
         conn.execute(text("INSERT INTO notes(user_id,content) VALUES (:uid,:c)"),{"uid":uid,"c":content})
     audit(email, "note", {"content": content[:120]})
     return {"ok": True}
+
+# ---------- Money Bots (AI Content) ----------
+@app.get("/ui/ai-content", response_class=HTMLResponse)
+def ui_ai_content(req: Request):
+    uid, email, role = require_user(req)
+    return render("ai_content.html", email=email)
+
+@app.get("/ai/profiles")
+def ai_profiles(req: Request):
+    _uid, email, role = require_user(req)
+    with engine.begin() as conn:
+        rows = conn.execute(text(
+            """
+            SELECT id, name, tone, voice, target_platform, guidelines,
+                   TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS created_at,
+                   TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
+            FROM ai_content_profiles
+            ORDER BY ai_content_profiles.updated_at DESC, ai_content_profiles.id DESC
+            LIMIT 200
+            """
+        )).fetchall()
+    return {"profiles": [format_profile(r) for r in rows]}
+
+@app.post("/ai/profiles")
+def ai_profile_create(req: Request, payload: dict):
+    uid, email, role = require_user(req)
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "profile name required")
+    tone = (payload.get("tone") or "").strip()
+    voice = (payload.get("voice") or "").strip()
+    target = (payload.get("target_platform") or "").strip()
+    guidelines = (payload.get("guidelines") or "").strip()
+    with engine.begin() as conn:
+        try:
+            row = conn.execute(text(
+                """
+                INSERT INTO ai_content_profiles(name,tone,voice,target_platform,guidelines)
+                VALUES (:name,:tone,:voice,:target,:guidelines)
+                RETURNING id,name,tone,voice,target_platform,guidelines,
+                          TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS created_at,
+                          TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
+                """
+            ), {
+                "name": name,
+                "tone": tone,
+                "voice": voice,
+                "target": target,
+                "guidelines": guidelines,
+            }).fetchone()
+        except IntegrityError:
+            raise HTTPException(409, "profile name already exists")
+    audit(email, "ai:profile:create", {"profile": name})
+    return {"profile": format_profile(row)}
+
+@app.put("/ai/profiles/{profile_id}")
+def ai_profile_update(req: Request, profile_id: int, payload: dict):
+    uid, email, role = require_user(req)
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "profile name required")
+    tone = (payload.get("tone") or "").strip()
+    voice = (payload.get("voice") or "").strip()
+    target = (payload.get("target_platform") or "").strip()
+    guidelines = (payload.get("guidelines") or "").strip()
+    with engine.begin() as conn:
+        try:
+            row = conn.execute(text(
+                """
+                UPDATE ai_content_profiles
+                SET name=:name, tone=:tone, voice=:voice, target_platform=:target,
+                    guidelines=:guidelines, updated_at=NOW()
+                WHERE id=:id
+                RETURNING id,name,tone,voice,target_platform,guidelines,
+                          TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS created_at,
+                          TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
+                """
+            ), {
+                "id": profile_id,
+                "name": name,
+                "tone": tone,
+                "voice": voice,
+                "target": target,
+                "guidelines": guidelines,
+            }).fetchone()
+        except IntegrityError:
+            raise HTTPException(409, "profile name already exists")
+    if not row:
+        raise HTTPException(404, "profile not found")
+    audit(email, "ai:profile:update", {"profile_id": profile_id})
+    return {"profile": format_profile(row)}
+
+@app.delete("/ai/profiles/{profile_id}")
+def ai_profile_delete(req: Request, profile_id: int):
+    uid, email, role = require_user(req)
+    with engine.begin() as conn:
+        res = conn.execute(text("DELETE FROM ai_content_profiles WHERE id=:id"), {"id": profile_id})
+    if res.rowcount == 0:
+        raise HTTPException(404, "profile not found")
+    audit(email, "ai:profile:delete", {"profile_id": profile_id})
+    return {"ok": True}
+
+@app.get("/ai/jobs")
+def ai_jobs(req: Request, profile_id: Optional[int] = Query(None), limit: int = Query(20, ge=1, le=100)):
+    _uid, email, role = require_user(req)
+    base_sql = (
+        "SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, j.title, j.keywords, j.brief, j.data_sources, "
+        "j.content_type, j.generated_content, j.status, "
+        "TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at, TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at "
+        "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id"
+    )
+    params = {"limit": limit}
+    if profile_id:
+        base_sql += " WHERE j.profile_id=:pid"
+        params["pid"] = profile_id
+    base_sql += " ORDER BY j.updated_at DESC, j.id DESC LIMIT :limit"
+    with engine.begin() as conn:
+        rows = conn.execute(text(base_sql), params).fetchall()
+    return {"jobs": [format_job(r) for r in rows]}
+
+@app.get("/ai/jobs/{job_id}")
+def ai_job_detail(req: Request, job_id: int):
+    _uid, email, role = require_user(req)
+    with engine.begin() as conn:
+        row = conn.execute(text(
+            """
+            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, j.title, j.keywords,
+                   j.brief, j.data_sources, j.content_type, j.generated_content, j.status,
+                   TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
+                   TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
+            FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id
+            WHERE j.id=:id
+            """
+        ), {"id": job_id}).fetchone()
+    if not row:
+        raise HTTPException(404, "job not found")
+    return {"job": format_job(row)}
+
+@app.delete("/ai/jobs/{job_id}")
+def ai_job_delete(req: Request, job_id: int):
+    uid, email, role = require_user(req)
+    with engine.begin() as conn:
+        res = conn.execute(text("DELETE FROM ai_content_jobs WHERE id=:id"), {"id": job_id})
+    if res.rowcount == 0:
+        raise HTTPException(404, "job not found")
+    audit(email, "ai:job:delete", {"job_id": job_id})
+    return {"ok": True}
+
+@app.post("/ai/content")
+def ai_generate(req: Request, payload: dict):
+    uid, email, role = require_user(req)
+    try:
+        profile_id = int(payload.get("profile_id")) if payload.get("profile_id") else None
+    except (TypeError, ValueError):
+        raise HTTPException(400, "invalid profile id")
+    title = (payload.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "title required")
+    content_type = (payload.get("content_type") or "social-post").strip() or "social-post"
+    keywords = payload.get("keywords")
+    if isinstance(keywords, list):
+        keywords = ", ".join([str(k).strip() for k in keywords if str(k).strip()])
+    else:
+        keywords = (keywords or "").strip()
+    brief = (payload.get("brief") or "").strip()
+    data_sources = (payload.get("data_sources") or "").strip()
+    extra = (payload.get("extra") or "").strip()
+    with engine.begin() as conn:
+        profile_row = None
+        if profile_id:
+            profile_row = conn.execute(text(
+                "SELECT id, name, tone, voice, target_platform, guidelines FROM ai_content_profiles WHERE id=:id"
+            ), {"id": profile_id}).fetchone()
+            if not profile_row:
+                raise HTTPException(404, "profile not found")
+        profile_dict = {
+            "tone": profile_row.tone if profile_row else payload.get("tone", ""),
+            "voice": profile_row.voice if profile_row else payload.get("voice", ""),
+            "target_platform": profile_row.target_platform if profile_row else payload.get("target_platform", ""),
+            "guidelines": profile_row.guidelines if profile_row else payload.get("guidelines", ""),
+            "name": profile_row.name if profile_row else payload.get("profile_label", ""),
+        }
+        inserted = conn.execute(text(
+            """
+            INSERT INTO ai_content_jobs(profile_id,title,keywords,brief,data_sources,content_type,status,created_by)
+            VALUES (:pid,:title,:keywords,:brief,:data_sources,:ctype,'pending',:uid)
+            RETURNING id
+            """
+        ), {
+            "pid": profile_id,
+            "title": title,
+            "keywords": keywords,
+            "brief": brief,
+            "data_sources": data_sources,
+            "ctype": content_type,
+            "uid": uid,
+        }).fetchone()
+        job_id = inserted.id
+    messages = build_ai_messages(profile_dict, title, content_type, keywords, brief, data_sources, extra)
+    try:
+        status, generated, note = ai_call(messages)
+    except HTTPException as he:
+        with engine.begin() as conn:
+            conn.execute(text(
+                "UPDATE ai_content_jobs SET status='error', generated_content=:msg, updated_at=NOW() WHERE id=:id"
+            ), {"id": job_id, "msg": f"Generation failed: {he.detail}"})
+        raise
+    with engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE ai_content_jobs SET generated_content=:content, status=:status, updated_at=NOW() WHERE id=:id"
+        ), {"id": job_id, "content": generated, "status": status})
+        row = conn.execute(text(
+            """
+            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, j.title, j.keywords,
+                   j.brief, j.data_sources, j.content_type, j.generated_content, j.status,
+                   TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
+                   TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
+            FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id
+            WHERE j.id=:id
+            """
+        ), {"id": job_id}).fetchone()
+    if not row:
+        raise HTTPException(500, "job retrieval failed")
+    audit(email, "ai:generate", {"job_id": job_id, "title": title, "profile": profile_dict.get("name")})
+    return {"job": format_job(row), "note": note}
 
 # ---------- Proxmox helpers ----------
 def pve_headers():
