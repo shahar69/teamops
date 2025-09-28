@@ -10,6 +10,7 @@ Internal control plane for a 3-person team (Shahar – lead, Oded, Orel) running
 * Proxmox VM control (list/start/stop/restart/snapshot)
 * Central sign-in (simple email+pass via backend), notifications and future calendar/tasks
 * Public access over the internet (credentials required), TLS planned later
+* Opinionated presets for rapid VM rollout (e.g. crew automation VM on 192.168.1.20)
 
 ## Final stack (current)
 
@@ -112,6 +113,10 @@ Project root: `/opt/teamops`
   * `POST /admin/init` with JSON to seed admin + users
     (`shahar@liork.cloud`, `oded@liork.cloud`, `orel@liork.cloud`) with initial passwords
 * DB: SQLAlchemy + psycopg2 (tables: users, announcements, notes, etc.)
+* Proxmox helpers:
+
+  * Generic VM/LXC create endpoints (`POST /api/pve/qemu/create`, `/api/pve/lxc/create`)
+  * **Crew preset**: `POST /api/pve/qemu/create/crew` provisions a cloud-init VM with defaults tailored for the automation stack (name `crew-software`, static IP `192.168.1.20/24`, bridge `vmbr0`, `crew` cloud-init user). Overrides may be supplied in the JSON payload (node, storage, resources, credentials, etc.).
 
 ## Dashy config (conf.yml)
 
@@ -170,6 +175,12 @@ docker compose up -d
 curl -s http://127.0.0.1:8000/health  # {"ok":true}
 
 # create NPM Proxy Hosts (see list above) or use NPM UI at http://<LAN_IP>:81
+
+# provision the crew automation VM (defaults to node[0], vmbr0, 192.168.1.20)
+curl -X POST http://backend.liork.cloud/api/pve/qemu/create/crew \
+  -H 'Content-Type: application/json' \
+  -b 'session=<leader-session-cookie>' \
+  -d '{"node":"pve"}'
 
 # seed users once (after DB reset)
 curl -X POST http://backend.liork.cloud/admin/init \

@@ -43,10 +43,12 @@ function editVM(node, vmid){ window.open(`/ui/vm/${node}/${vmid}/edit`,'_blank')
 
 async function loadSelectors(){
   const nodes = await (await fetch('/api/pve/nodes')).json();
-  for(const id of ['c_node','l_node','clone_node']) {
-    const sel = document.getElementById(id); sel.innerHTML = nodes.map(n=>`<option>${n.node}</option>`).join('');
+  for(const id of ['c_node','l_node','clone_node','crew_node']) {
+    const sel = document.getElementById(id);
+    if(!sel) continue;
+    sel.innerHTML = nodes.map(n=>`<option>${n.node}</option>`).join('');
   }
-  await refreshNodeDeps('c_'); await refreshNodeDeps('l_'); await refreshNodeDeps('clone_');
+  await refreshNodeDeps('c_'); await refreshNodeDeps('l_'); await refreshNodeDeps('clone_'); await refreshCrewDeps();
 }
 async function refreshNodeDeps(prefix){
   const node = document.getElementById(prefix+'node').value;
@@ -68,6 +70,26 @@ async function refreshNodeDeps(prefix){
     document.getElementById('c_iso').innerHTML = `<option value="">(none)</option>` + isos.map(i=>`<option value="${i.volid}">${i.volid}</option>`).join('');
   }
 }
+
+async function refreshCrewDeps(){
+  const sel = document.getElementById('crew_node');
+  if(!sel) return;
+  const node = sel.value;
+  try{
+    const storesResp = await fetch(`/api/pve/${node}/storages`);
+    if(!storesResp.ok) throw new Error('storages fetch failed');
+    const stores = await storesResp.json();
+    document.getElementById('crew_storage').innerHTML = stores.map(s=>`<option>${s.storage}</option>`).join('');
+    const bridgesResp = await fetch(`/api/pve/${node}/bridges`);
+    if(!bridgesResp.ok) throw new Error('bridges fetch failed');
+    const bridges = await bridgesResp.json();
+    document.getElementById('crew_bridge').innerHTML = bridges.map(b=>`<option>${b.iface}</option>`).join('');
+  }catch(err){
+    console.error('Crew deps load failed', err);
+    document.getElementById('crew_storage').innerHTML = '<option value="">(unavailable)</option>';
+    document.getElementById('crew_bridge').innerHTML = '<option value="">(unavailable)</option>';
+  }
+}
 async function nextId(tgt){ const j = await (await fetch('/api/pve/nextid')).json(); document.getElementById(tgt).value=j.vmid; }
 
 async function submitCreateVM(){
@@ -82,6 +104,37 @@ async function submitCreateVM(){
   const r = await fetch('/api/pve/qemu/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
   if(!r.ok){ alert('Create failed: '+await r.text()); return; }
   alert('VM created'); hide('modalCreateVM'); location.reload();
+}
+
+function openCrewModal(){
+  document.getElementById('crew_name').value = 'crew-software';
+  document.getElementById('crew_ip').value = '192.168.1.20/24';
+  document.getElementById('crew_gateway').value = '192.168.1.1';
+  document.getElementById('crew_ciuser').value = 'crew';
+  document.getElementById('crew_vmid').value = '';
+  show('modalCrew');
+}
+
+async function submitCrewVM(){
+  const p = {
+    node: crew_node.value,
+    vmid: crew_vmid.value,
+    name: crew_name.value,
+    memory: crew_mem.value,
+    cores: crew_cores.value,
+    storage: crew_storage.value,
+    disk_gb: crew_disk.value,
+    bridge: crew_bridge.value,
+    ip: crew_ip.value,
+    gateway: crew_gateway.value,
+    ciuser: crew_ciuser.value,
+    cipassword: crew_cipass.value,
+    sshkeys: crew_ssh.value
+  };
+  if(!p.name){ alert('Name required'); return; }
+  const r = await fetch('/api/pve/qemu/create/crew',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(p)});
+  if(!r.ok){ alert('Crew VM failed: '+await r.text()); return; }
+  alert('Crew VM provisioning started'); hide('modalCrew'); location.reload();
 }
 
 async function submitCreateLXC(){
@@ -129,6 +182,7 @@ async function mapCustomer(node, vmid){
   <div>
     <button onclick="show('modalCreateVM')">+ Create VM</button>
     <button onclick="show('modalCreateLXC')">+ Create LXC</button>
+    <button onclick="openCrewModal()">Crew VM</button>
   </div>
 </div>
 <div>
@@ -205,6 +259,22 @@ async function mapCustomer(node, vmid){
     <div class="row"><select id="l_bridge"></select><input id="l_ip" placeholder="ip (dhcp or ip/cidr,gw=...)"></div>
     <div class="row"><input id="l_pass" type="password" placeholder="root password"></div>
     <div class="row"><button onclick="submitCreateLXC()">Create</button><button onclick="hide('modalCreateLXC')">Cancel</button></div>
+  </div>
+</div>
+
+<!-- Crew VM preset -->
+<div id="modalCrew" class="modal" onclick="if(event.target===this)hide('modalCrew')">
+  <div class="card">
+    <h4>Provision Crew VM</h4>
+    <p><small>Creates a cloud-init VM pinned to 192.168.1.20/24 for crew automation.</small></p>
+    <div class="row"><select id="crew_node" onchange="refreshCrewDeps()"></select><input id="crew_vmid" placeholder="VMID (blank=auto)"></div>
+    <div class="row"><input id="crew_name" placeholder="Name"><input id="crew_mem" type="number" value="4096" placeholder="Memory (MB)"></div>
+    <div class="row"><input id="crew_cores" type="number" value="4" placeholder="Cores"><input id="crew_disk" type="number" value="60" placeholder="Disk GB"></div>
+    <div class="row"><select id="crew_storage"></select><select id="crew_bridge"></select></div>
+    <div class="row"><input id="crew_ip" placeholder="IP (CIDR)"><input id="crew_gateway" placeholder="Gateway"></div>
+    <div class="row"><input id="crew_ciuser" placeholder="ciuser"><input id="crew_cipass" placeholder="cipassword"></div>
+    <div class="row"><input id="crew_ssh" placeholder="sshkeys"></div>
+    <div class="row"><button onclick="submitCrewVM()">Provision</button><button onclick="hide('modalCrew')">Cancel</button></div>
   </div>
 </div>
 
