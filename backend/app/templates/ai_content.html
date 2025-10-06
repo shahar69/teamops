@@ -1,0 +1,358 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Money Bots · AI Content Lab</title>
+  <style>
+    body{font-family:system-ui;background:#0b0f14;color:#e8edf5;margin:0}
+    .wrap{padding:18px;max-width:1160px;margin:0 auto}
+    h1,h2,h3{margin:0 0 12px}
+    .muted{color:#94a3b8;font-size:0.92rem}
+    .grid{display:grid;gap:16px;margin-top:18px}
+    .two{grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+    .panel{background:#111923;border-radius:14px;padding:18px;box-shadow:0 0 0 1px #1e2633}
+    label{display:block;font-size:0.85rem;margin-top:8px;margin-bottom:4px;color:#9fb3d3}
+    input,textarea,select{width:100%;background:#0e141d;color:#f1f5f9;border:1px solid #1f2937;border-radius:10px;padding:9px;font-size:0.95rem}
+    textarea{min-height:96px;resize:vertical}
+    button{background:#2563eb;color:#fff;border:none;border-radius:10px;padding:9px 16px;margin-top:12px;font-size:0.95rem;cursor:pointer;transition:background .2s}
+    button:hover{background:#1d4ed8}
+    button.secondary{background:#1f2937}
+    button.secondary:hover{background:#111827}
+    .flex{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+    .chip{background:#1e293b;padding:4px 8px;border-radius:999px;font-size:0.8rem}
+    .profile-card{padding:14px;background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;margin-top:12px}
+    .profile-card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .status{display:inline-flex;align-items:center;gap:6px;font-size:0.85rem}
+    .status.ready{color:#4ade80}
+    .status.needs_config{color:#facc15}
+    .status.error{color:#f87171}
+    .job{background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;padding:14px;margin-top:12px}
+    pre{white-space:pre-wrap;word-wrap:break-word;background:#0b1220;border-radius:12px;padding:12px;margin-top:12px;font-size:0.9rem}
+    .list-header{display:flex;justify-content:space-between;align-items:center}
+    .small{font-size:0.8rem;color:#94a3b8}
+    .actions button{margin-right:8px}
+    .inline{display:inline-flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Money Making Bots</h1>
+    <p class="muted">Build reusable voices and spin up social content, Reddit-style stories, or short-form video scripts on demand. Profiles capture tone, voice, and platform targets so every drop stays on-brand.</p>
+
+    <div class="grid two">
+      <section class="panel">
+        <h3>1 · Save a creator profile</h3>
+        <form id="profileForm">
+          <label for="profile_name">Profile name</label>
+          <input id="profile_name" placeholder="e.g. TikTok Storyteller" required>
+
+          <label for="profile_tone">Tone / energy</label>
+          <input id="profile_tone" placeholder="upbeat, witty, cinematic">
+
+          <label for="profile_voice">Voice description</label>
+          <input id="profile_voice" placeholder="first-person gamer, mentor, narrator">
+
+          <label for="profile_platform">Primary platforms</label>
+          <input id="profile_platform" placeholder="TikTok · Instagram Reels · Reddit">
+
+          <label for="profile_rules">Guidelines / mandatory beats</label>
+          <textarea id="profile_rules" placeholder="Key selling points, compliance notes, structure cues"></textarea>
+
+          <button type="submit">Save profile</button>
+        </form>
+        <div id="profilesEmpty" class="muted" style="margin-top:12px;display:none">No profiles yet. Start by saving one.</div>
+        <div id="profilesList"></div>
+      </section>
+
+      <section class="panel">
+        <h3>2 · Generate content</h3>
+        <form id="generationForm">
+          <label for="gen_profile">Profile</label>
+          <select id="gen_profile"></select>
+
+          <label for="gen_type">Content type</label>
+          <select id="gen_type">
+            <option value="social-post">Social media drop (3 posts)</option>
+            <option value="reddit-story">Reddit farm story</option>
+            <option value="video-script">Short-form video script</option>
+          </select>
+
+          <label for="gen_title">Campaign title / hook</label>
+          <input id="gen_title" placeholder="Farmed horror win in Apex Legends" required>
+
+          <label for="gen_keywords">Keywords (comma separated)</label>
+          <input id="gen_keywords" placeholder="gaming, apex legends, horror twist">
+
+          <label for="gen_brief">Creative brief</label>
+          <textarea id="gen_brief" placeholder="What should this piece accomplish?"></textarea>
+
+          <label for="gen_sources">Data feeds / references</label>
+          <textarea id="gen_sources" placeholder="Links, stats, existing docs"></textarea>
+
+          <label for="gen_extra">Extra operator notes</label>
+          <textarea id="gen_extra" placeholder="Add twists, monetization angles, CTA specifics"></textarea>
+
+          <div class="flex">
+            <button type="submit">Generate</button>
+            <button type="button" class="secondary" onclick="copyOutput()">Copy output</button>
+            <span id="aiStatus" class="muted"></span>
+          </div>
+        </form>
+        <pre id="gen_output" style="display:none"></pre>
+      </section>
+    </div>
+
+    <section class="panel" style="margin-top:18px">
+      <div class="list-header">
+        <h3>3 · Recent automation runs</h3>
+        <button type="button" class="secondary" onclick="refreshJobs()">Refresh</button>
+      </div>
+      <div id="jobsEmpty" class="muted" style="margin-top:12px;display:none">No generations yet. Launch one above.</div>
+      <div id="jobsList"></div>
+    </section>
+  </div>
+  <script>
+    const esc = (value) => String(value ?? '').replace(/[&<>]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+    let profiles = [];
+    let jobs = [];
+    let editingProfileId = null;
+    const profileSelect = document.getElementById('gen_profile');
+    profileSelect.innerHTML = '<option value="">(loading profiles...)</option>';
+
+    async function fetchJSON(url, options) {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || (res.status + ' ' + res.statusText));
+      }
+      return await res.json();
+    }
+
+    async function loadProfiles() {
+      try {
+        const data = await fetchJSON('/ai/profiles');
+        profiles = data.profiles || [];
+        renderProfiles();
+      } catch (err) {
+        console.error('Profiles load failed', err);
+        document.getElementById('profilesEmpty').style.display = 'block';
+        document.getElementById('profilesEmpty').textContent = 'Failed to load profiles: ' + err.message;
+      }
+    }
+
+    function renderProfiles() {
+      const wrap = document.getElementById('profilesList');
+      wrap.innerHTML = '';
+      const empty = document.getElementById('profilesEmpty');
+      if (!profiles.length) {
+        empty.style.display = 'block';
+        if (!document.getElementById('gen_profile').value) {
+          document.getElementById('gen_profile').innerHTML = '<option value="">(no saved profiles)</option>';
+        }
+        return;
+      }
+      empty.style.display = 'none';
+      const select = document.getElementById('gen_profile');
+      const previous = select.value;
+      select.innerHTML = '<option value="">Custom prompt (no saved profile)</option>' + profiles.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('');
+      if (previous && profiles.some(p => String(p.id) === previous)) {
+        select.value = previous;
+      } else if (profiles.length) {
+        select.value = profiles[0].id;
+      }
+      profiles.forEach((p) => {
+        const card = document.createElement('div');
+        card.className = 'profile-card';
+        const pid = JSON.stringify(p.id);
+        card.innerHTML = `
+          <header>
+            <div>
+              <strong>${esc(p.name)}</strong><div class="small">Updated ${esc(p.updated_at || '')}</div>
+            </div>
+            <div class="actions">
+              <button class="secondary" type="button" onclick="prefillProfile(${pid})">Load</button>
+              <button class="secondary" type="button" onclick="removeProfile(${pid})">Delete</button>
+            </div>
+          </header>
+          <div class="small">Tone: ${esc(p.tone || '—')}</div>
+          <div class="small">Voice: ${esc(p.voice || '—')}</div>
+          <div class="small">Platforms: ${esc(p.target_platform || '—')}</div>
+          <div class="small" style="margin-top:6px">Guidelines:<br>${esc(p.guidelines || '—')}</div>
+        `;
+        wrap.appendChild(card);
+      });
+    }
+
+    function resetProfileForm() {
+      document.getElementById('profileForm').reset();
+      editingProfileId = null;
+      document.querySelector('#profileForm button[type="submit"]').textContent = 'Save profile';
+      document.getElementById('profile_name').focus();
+    }
+
+    async function saveProfile(event) {
+      event.preventDefault();
+      const payload = {
+        name: document.getElementById('profile_name').value.trim(),
+        tone: document.getElementById('profile_tone').value.trim(),
+        voice: document.getElementById('profile_voice').value.trim(),
+        target_platform: document.getElementById('profile_platform').value.trim(),
+        guidelines: document.getElementById('profile_rules').value.trim(),
+      };
+      if (!payload.name) {
+        alert('Profile name is required');
+        return;
+      }
+      try {
+        if (editingProfileId) {
+          await fetchJSON(`/ai/profiles/${editingProfileId}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+          });
+        } else {
+          await fetchJSON('/ai/profiles', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload),
+          });
+        }
+        resetProfileForm();
+        loadProfiles();
+      } catch (err) {
+        alert('Save failed: ' + err.message);
+      }
+    }
+
+    function prefillProfile(id) {
+      const target = Number(id);
+      const p = profiles.find((x) => Number(x.id) === target);
+      if (!p) return;
+      document.getElementById('profile_name').value = p.name;
+      document.getElementById('profile_tone').value = p.tone;
+      document.getElementById('profile_voice').value = p.voice;
+      document.getElementById('profile_platform').value = p.target_platform;
+      document.getElementById('profile_rules').value = p.guidelines;
+      document.getElementById('gen_profile').value = String(p.id);
+      editingProfileId = target;
+      document.querySelector('#profileForm button[type="submit"]').textContent = 'Update profile';
+    }
+
+    async function removeProfile(id) {
+      if (!confirm('Delete this profile?')) return;
+      const target = Number(id);
+      try {
+        await fetchJSON(`/ai/profiles/${target}`, { method: 'DELETE' });
+        if (Number(document.getElementById('gen_profile').value) === target) {
+          document.getElementById('gen_profile').value = '';
+        }
+        if (editingProfileId === target) {
+          resetProfileForm();
+        }
+        loadProfiles();
+      } catch (err) {
+        alert('Delete failed: ' + err.message);
+      }
+    }
+
+    async function runGeneration(event) {
+      event.preventDefault();
+      const payload = {
+        profile_id: document.getElementById('gen_profile').value || null,
+        content_type: document.getElementById('gen_type').value,
+        title: document.getElementById('gen_title').value.trim(),
+        keywords: document.getElementById('gen_keywords').value.trim(),
+        brief: document.getElementById('gen_brief').value.trim(),
+        data_sources: document.getElementById('gen_sources').value.trim(),
+        extra: document.getElementById('gen_extra').value.trim(),
+      };
+      if (!payload.title) {
+        alert('Title is required');
+        return;
+      }
+      setStatus('Generating...');
+      try {
+        const data = await fetchJSON('/ai/content', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+        const job = data.job;
+        const out = document.getElementById('gen_output');
+        out.style.display = 'block';
+        out.textContent = job.generated_content || '[no content returned]';
+        setStatus(data.note || `Status: ${job.status}`);
+        refreshJobs();
+      } catch (err) {
+        setStatus('Error: ' + err.message);
+        const out = document.getElementById('gen_output');
+        out.style.display = 'block';
+        out.textContent = 'Generation failed: ' + err.message;
+      }
+    }
+
+    async function refreshJobs() {
+      try {
+        const data = await fetchJSON('/ai/jobs');
+        jobs = data.jobs || [];
+        renderJobs();
+      } catch (err) {
+        console.error('Jobs load failed', err);
+        const empty = document.getElementById('jobsEmpty');
+        empty.style.display = 'block';
+        empty.textContent = 'Failed to load jobs: ' + err.message;
+      }
+    }
+
+    function renderJobs() {
+      const wrap = document.getElementById('jobsList');
+      wrap.innerHTML = '';
+      const empty = document.getElementById('jobsEmpty');
+      if (!jobs.length) {
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      jobs.forEach((j) => {
+        const div = document.createElement('div');
+        div.className = 'job';
+        div.innerHTML = `
+          <div class="inline">
+            <strong>${esc(j.title)}</strong>
+            <span class="chip">${esc(j.content_type || 'custom')}</span>
+          </div>
+          <div class="small">Profile: ${esc(j.profile_name || 'custom prompt')}</div>
+          <div class="small">Ran ${esc(j.updated_at || j.created_at || '')}</div>
+          <div class="status ${esc(j.status)}">Status: ${esc(j.status)}</div>
+          <div class="small" style="margin-top:8px">Keywords: ${esc(j.keywords || '—')}</div>
+          <details style="margin-top:10px">
+            <summary class="small">View output</summary>
+            <pre>${esc(j.generated_content || '')}</pre>
+          </details>
+        `;
+        wrap.appendChild(div);
+      });
+    }
+
+    function setStatus(msg) {
+      document.getElementById('aiStatus').textContent = msg || '';
+    }
+
+    function copyOutput() {
+      const text = document.getElementById('gen_output').textContent;
+      if (!text) {
+        alert('Nothing to copy yet.');
+        return;
+      }
+      navigator.clipboard.writeText(text).then(() => setStatus('Copied to clipboard'), (err) => setStatus('Copy failed: ' + err));
+    }
+
+    document.getElementById('profileForm').addEventListener('submit', saveProfile);
+    document.getElementById('generationForm').addEventListener('submit', runGeneration);
+
+    loadProfiles();
+    refreshJobs();
+  </script>
+</body>
+</html>
