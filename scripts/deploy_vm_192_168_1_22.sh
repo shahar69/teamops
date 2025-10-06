@@ -193,23 +193,10 @@ seed_users() {
   orel_email="$(default_read "Co-owner #2 email" "orel@liork.cloud")"
   orel_pass="$(secure_read "Co-owner #2 password" "OrelStrongPass!")"
 
-  local payload
-  payload=$(jq -n \
-    --arg admin_email "$admin_email" \
-    --arg admin_pass "$admin_pass" \
-    --arg oded_email "$oded_email" \
-    --arg oded_pass "$oded_pass" \
-    --arg orel_email "$orel_email" \
-    --arg orel_pass "$orel_pass" \
-    '{admin_email:$admin_email,admin_pass:$admin_pass,oded_email:$oded_email,oded_pass:$oded_pass,orel_email:$orel_email,orel_pass:$orel_pass}')
-
-  if curl -fsS -X POST http://127.0.0.1:8000/admin/init \
-      -H 'Content-Type: application/json' \
-      -d "$payload" >/dev/null; then
-    echo "[OK] Seeded users"
-  else
-    echo "[WARN] User seeding skipped (possibly already done)"
-  fi
+  curl -fsS -X POST http://127.0.0.1:8000/admin/init \
+    -H 'Content-Type: application/json' \
+    -d "{\"admin_email\":\"$admin_email\",\"admin_pass\":\"$admin_pass\",\"oded_email\":\"$oded_email\",\"oded_pass\":\"$oded_pass\",\"orel_email\":\"$orel_email\",\"orel_pass\":\"$orel_pass\"}" \
+    >/dev/null && echo "[OK] Seeded users" || echo "[WARN] User seeding skipped (possibly already done)"
 }
 
 print_summary() {
