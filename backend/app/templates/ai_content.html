@@ -116,7 +116,6 @@
     const esc = (value) => String(value ?? '').replace(/[&<>]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
     let profiles = [];
     let jobs = [];
-    let editingProfileId = null;
     const profileSelect = document.getElementById('gen_profile');
     profileSelect.innerHTML = '<option value="">(loading profiles...)</option>';
 
@@ -184,13 +183,6 @@
       });
     }
 
-    function resetProfileForm() {
-      document.getElementById('profileForm').reset();
-      editingProfileId = null;
-      document.querySelector('#profileForm button[type="submit"]').textContent = 'Save profile';
-      document.getElementById('profile_name').focus();
-    }
-
     async function saveProfile(event) {
       event.preventDefault();
       const payload = {
@@ -205,20 +197,12 @@
         return;
       }
       try {
-        if (editingProfileId) {
-          await fetchJSON(`/ai/profiles/${editingProfileId}`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload),
-          });
-        } else {
-          await fetchJSON('/ai/profiles', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload),
-          });
-        }
-        resetProfileForm();
+        await fetchJSON('/ai/profiles', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload),
+        });
+        document.getElementById('profileForm').reset();
         loadProfiles();
       } catch (err) {
         alert('Save failed: ' + err.message);
@@ -235,8 +219,6 @@
       document.getElementById('profile_platform').value = p.target_platform;
       document.getElementById('profile_rules').value = p.guidelines;
       document.getElementById('gen_profile').value = String(p.id);
-      editingProfileId = target;
-      document.querySelector('#profileForm button[type="submit"]').textContent = 'Update profile';
     }
 
     async function removeProfile(id) {
@@ -246,9 +228,6 @@
         await fetchJSON(`/ai/profiles/${target}`, { method: 'DELETE' });
         if (Number(document.getElementById('gen_profile').value) === target) {
           document.getElementById('gen_profile').value = '';
-        }
-        if (editingProfileId === target) {
-          resetProfileForm();
         }
         loadProfiles();
       } catch (err) {
