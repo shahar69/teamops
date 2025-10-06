@@ -18,9 +18,9 @@ services:
     image: postgres:16
     restart: unless-stopped
     environment:
-      POSTGRES_DB: teamops
-      POSTGRES_USER: teamops
-      POSTGRES_PASSWORD: teamops-db-pass-STRONG
+      POSTGRES_DB: ${POSTGRES_DB:-teamops}
+      POSTGRES_USER: ${POSTGRES_USER:-teamops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-teamops-db-pass-STRONG}
     volumes:
       - db_data:/var/lib/postgresql/data
     networks: [ teamops ]
@@ -30,16 +30,20 @@ services:
     # (switch to an image later if you use GHCR)
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg2://teamops:teamops-db-pass-STRONG@db:5432/teamops
-      BACKEND_SECRET: super-secret-long-random
-      PVE_HOST: https://192.168.1.2:8006
-      PVE_TOKEN_ID: teamops@pve!dash
-      PVE_TOKEN_SECRET: your-proxmox-token-secret
-      NEXTCLOUD_BASE: http://nextcloud
-      NEXTCLOUD_ADMIN: admin
-      NEXTCLOUD_ADMIN_PASS: change-me
-      KUMA_URL: http://kuma:3001
-      KUMA_TOKEN: ""
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://teamops:${POSTGRES_PASSWORD:-teamops-db-pass-STRONG}@db:5432/${POSTGRES_DB:-teamops}}
+      BACKEND_SECRET: ${BACKEND_SECRET:-super-secret-long-random}
+      PVE_HOST: ${PVE_HOST:-https://192.168.1.22:8006}
+      PVE_TOKEN_ID: ${PVE_TOKEN_ID:-teamops@pve!dash}
+      PVE_TOKEN_SECRET: ${PVE_TOKEN_SECRET:-set-proxmox-token}
+      NEXTCLOUD_BASE: ${NEXTCLOUD_BASE:-http://nextcloud}
+      NEXTCLOUD_ADMIN: ${NEXTCLOUD_ADMIN:-admin}
+      NEXTCLOUD_ADMIN_PASS: ${NEXTCLOUD_ADMIN_PASS:-change-me}
+      KUMA_URL: ${KUMA_URL:-http://kuma:3001}
+      KUMA_TOKEN: ${KUMA_TOKEN:-}
+      AI_API_BASE: ${AI_API_BASE:-https://api.openai.com/v1}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
+      AI_TIMEOUT: ${AI_TIMEOUT:-45}
     depends_on: [ db ]
     ports:
       - "8000:8000"
@@ -79,10 +83,10 @@ services:
     image: mariadb:11
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ncroot-pass-STRONG
-      MYSQL_DATABASE: nextcloud
-      MYSQL_USER: nextcloud
-      MYSQL_PASSWORD: nextcloud-pass-STRONG
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-ncroot-pass-STRONG}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-nextcloud}
+      MYSQL_USER: ${MYSQL_USER:-nextcloud}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-nextcloud-pass-STRONG}
     volumes:
       - nextcloud_db_data:/var/lib/mysql
     networks: [ teamops ]
@@ -96,11 +100,11 @@ services:
     image: nextcloud:29-apache
     restart: unless-stopped
     environment:
-      MYSQL_HOST: nextcloud_db
-      MYSQL_DATABASE: nextcloud
-      MYSQL_USER: nextcloud
-      MYSQL_PASSWORD: nextcloud-pass-STRONG
-      REDIS_HOST: nextcloud_redis
+      MYSQL_HOST: ${MYSQL_HOST:-nextcloud_db}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-nextcloud}
+      MYSQL_USER: ${MYSQL_USER:-nextcloud}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-nextcloud-pass-STRONG}
+      REDIS_HOST: ${REDIS_HOST:-nextcloud_redis}
     depends_on: [ nextcloud_db, nextcloud_redis ]
     volumes:
       - nextcloud_data:/var/www/html
