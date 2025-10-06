@@ -30,7 +30,7 @@ services:
     # (switch to an image later if you use GHCR)
     restart: unless-stopped
     environment:
-      DATABASE_URL: "${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-teamops}:${POSTGRES_PASSWORD:-teamops-db-pass-STRONG}@db:5432/${POSTGRES_DB:-teamops}}"
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://teamops:${POSTGRES_PASSWORD:-teamops-db-pass-STRONG}@db:5432/${POSTGRES_DB:-teamops}}
       BACKEND_SECRET: ${BACKEND_SECRET:-super-secret-long-random}
       PVE_HOST: ${PVE_HOST:-https://192.168.1.22:8006}
       PVE_TOKEN_ID: ${PVE_TOKEN_ID:-teamops@pve!dash}
