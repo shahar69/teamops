@@ -18,30 +18,21 @@ these steps to bootstrap the complete stack:
    scp -r . root@192.168.1.22:/opt/teamops
    ```
 
-2. (Optional) Export any overrides you want the automation to honour—for
-   example `TEAMOPS_AI_API_KEY`, `TEAMOPS_ADMIN_EMAIL`, or
-   `TEAMOPS_GIT_BRANCH`. Every variable is documented in the
-   runbook and defaults to secure random values when omitted.
-
-3. SSH into the VM and launch the deployment script. The script now performs
-   full pre-flight checks (OS, root access, bound IP, UFW, port conflicts),
-   installs dependencies, manages the repository, writes or extends
-   `.env.production`, validates the compose file, builds the backend, applies a
-   rolling `docker compose up`, waits for health checks to pass, seeds default
-   users, and logs everything to `/var/log/teamops/deploy.log`—no placeholders
-   or manual edits required:
+2. SSH into the VM and launch the deployment script. The script installs
+   dependencies, writes a production `.env`, builds the backend, brings all
+   containers online, seeds the default users, and prints the service URLs—no
+   placeholders or manual edits required:
 
    ```bash
    ssh root@192.168.1.22
    cd /opt/teamops
-   ./scripts/deploy_vm_192_168_1_22.sh
+   ./scripts/deploy_vm_192_168_1_22.sh main
    ```
 
-4. After the script reports success, review the generated
-   `deploy-credentials-*.txt` summary under `/opt/teamops`, log into Nginx
-   Proxy Manager at `http://192.168.1.22:81` (change the default password),
-   access the backend at `http://192.168.1.22:8000`, and open the Money Bots UI
-   at `http://192.168.1.22:8000/ui/ai-content`.
+3. After the script reports success, log into Nginx Proxy Manager at
+   `http://192.168.1.22:81` (change the default password), access the backend
+   at `http://192.168.1.22:8000`, and open the Money Bots UI at
+   `http://192.168.1.22:8000/ui/ai-content`.
 
 Detailed instructions, optional customisations, and a post-deployment checklist
 are documented in [`docs/deploy_vm_192.168.1.22.md`](docs/deploy_vm_192.168.1.22.md).

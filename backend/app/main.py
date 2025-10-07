@@ -187,12 +187,13 @@ def audit(email: str, action: str, meta: dict):
 
 def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
     if not AI_API_KEY:
-        note = "AI provider is not configured. Set AI_API_KEY and AI_MODEL to enable live generations."
+        note = "AI provider is not configured. Set OPENAI_API_KEY to enable live generations."
         return (
             "needs_config",
-            "[offline] AI automation is not configured yet. Provide AI_API_KEY/AI_MODEL to enable live generations.",
+            "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations.",
             note,
         )
+main
     try:
         url = AI_API_BASE.rstrip('/') + "/chat/completions"
         headers = {
@@ -204,7 +205,7 @@ def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
             "messages": messages,
             "temperature": 0.65,
         }
-        resp = httpx.post(url, headers=headers, json=payload, timeout=httpx.Timeout(AI_TIMEOUT))
+        resp = httpx.post(url, headers=headers, json=payload, timeout=AI_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         choices = data.get("choices") or []
