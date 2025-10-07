@@ -35,6 +35,18 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 | `AI_API_KEY` | API key/token for the AI provider. | _empty_ |
 | `AI_TIMEOUT` | Timeout in seconds for the AI call. | `45` |
 
+### Publisher credentials
+
+Publisher connectors load credentials from environment variables (or the root `.env.production` file). Prefix everything with `PUBLISHER_` so the scheduler can validate configuration before making API calls.
+
+| Platform | Required variables | Notes |
+| --- | --- | --- |
+| Reddit (script app) | `PUBLISHER_REDDIT_CLIENT_ID`, `PUBLISHER_REDDIT_CLIENT_SECRET`, `PUBLISHER_REDDIT_USERNAME`, `PUBLISHER_REDDIT_PASSWORD`, `PUBLISHER_REDDIT_USER_AGENT` | Uses a personal-use script application with password grant to submit text posts. |
+| Twitter / X | `PUBLISHER_TWITTER_API_KEY`, `PUBLISHER_TWITTER_API_SECRET`, `PUBLISHER_TWITTER_ACCESS_TOKEN`, `PUBLISHER_TWITTER_ACCESS_SECRET`, `PUBLISHER_TWITTER_BEARER_TOKEN` | Requires elevated API v2 access with OAuth 1.0a user context for publishing threads. |
+| YouTube Shorts | `PUBLISHER_YOUTUBE_CLIENT_ID`, `PUBLISHER_YOUTUBE_CLIENT_SECRET`, `PUBLISHER_YOUTUBE_REFRESH_TOKEN`, `PUBLISHER_YOUTUBE_CHANNEL_ID` | Uses the YouTube Data API to upload Shorts under the configured channel. |
+
+Populate `.env.production` with production secrets (see the example committed in the repo) or export them in your deployment environment. The publisher modules read from the process environment first and fall back to this file for local development.
+
 If `AI_API_KEY` is not set, the backend stores a placeholder result and returns status `needs_config` so operators know configuration is required.
 
 ## Prompt design

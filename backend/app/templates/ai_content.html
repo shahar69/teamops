@@ -23,10 +23,13 @@
     .chip{background:#1e293b;padding:4px 8px;border-radius:999px;font-size:0.8rem}
     .profile-card{padding:14px;background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;margin-top:12px}
     .profile-card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .publisher-card{padding:14px;background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;margin-top:12px}
+    .publisher-card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
     .status{display:inline-flex;align-items:center;gap:6px;font-size:0.85rem}
     .status.ready{color:#4ade80}
     .status.needs_config{color:#facc15}
     .status.error{color:#f87171}
+    .status.muted{color:#94a3b8}
     .job{background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;padding:14px;margin-top:12px}
     pre{white-space:pre-wrap;word-wrap:break-word;background:#0b1220;border-radius:12px;padding:12px;margin-top:12px;font-size:0.9rem}
     .list-header{display:flex;justify-content:space-between;align-items:center}
@@ -63,6 +66,13 @@
   <div class="wrap">
     <h1>Money Making Bots</h1>
     <p class="muted">Build reusable voices and spin up social content, Reddit-style stories, or short-form video scripts on demand. Profiles capture tone, voice, and platform targets so every drop stays on-brand.</p>
+
+    <section class="panel">
+      <h3>0 · Platform connectors</h3>
+      <p class="muted">Load API keys in <code>.env.production</code> and run health checks before flipping on automation.</p>
+      <div id="publishersEmpty" class="muted" style="margin-top:12px;display:none">No publisher connectors detected.</div>
+      <div id="publishersList"></div>
+    </section>
 
     <div class="grid two">
       <section class="panel">
@@ -169,6 +179,7 @@
   </div>
   <script>
     const esc = (value) => String(value ?? '').replace(/[&<>]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+    let publishers = [];
     let profiles = [];
     let jobs = [];
     let schedules = [];
@@ -240,6 +251,73 @@
         throw new Error(text || (res.status + ' ' + res.statusText));
       }
       return await res.json();
+    }
+
+    async function loadPublishers() {
+      try {
+        const data = await fetchJSON('/ai/publishers');
+        publishers = data.publishers || [];
+        renderPublishers();
+      } catch (err) {
+        console.error('Publishers load failed', err);
+        const empty = document.getElementById('publishersEmpty');
+        empty.style.display = 'block';
+        empty.textContent = 'Failed to load publishers: ' + err.message;
+      }
+    }
+
+    function renderPublishers() {
+      const wrap = document.getElementById('publishersList');
+      wrap.innerHTML = '';
+      const empty = document.getElementById('publishersEmpty');
+      if (!publishers.length) {
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      publishers.forEach((p) => {
+        const card = document.createElement('div');
+        card.className = 'publisher-card';
+        const status = publisherStates[p.slug];
+        const statusClass = status ? (status.ok ? 'ready' : 'error') : 'muted';
+        const statusLabel = status ? status.message : 'No health check run yet';
+        const required = (p.required_env || []).map((item) => `<span class="chip">${esc(item)}</span>`).join(' ');
+        card.innerHTML = `
+          <header>
+            <div>
+              <strong>${esc(p.display_name || p.slug)}</strong>
+              <div class="small">${esc(p.description || '')}</div>
+            </div>
+            <button class="secondary" type="button" onclick="checkPublisher('${esc(p.slug)}')">Run health check</button>
+          </header>
+          <div class="small">Required env: ${required || '—'}</div>
+          ${p.notes ? `<div class="small" style="margin-top:8px">${esc(p.notes)}</div>` : ''}
+          <div class="small status ${statusClass}" id="publisher-status-${esc(p.slug)}">${esc(statusLabel)}</div>
+        `;
+        wrap.appendChild(card);
+      });
+    }
+
+    async function checkPublisher(slug) {
+      const statusEl = document.getElementById(`publisher-status-${slug}`);
+      if (statusEl) {
+        statusEl.textContent = 'Checking...';
+        statusEl.className = 'small status';
+      }
+      try {
+        const data = await fetchJSON(`/ai/publishers/${slug}/health`, { method: 'POST' });
+        const result = data.result || {};
+        publisherStates[slug] = {
+          ok: Boolean(result.success),
+          message: result.message || 'Check complete',
+        };
+      } catch (err) {
+        publisherStates[slug] = {
+          ok: false,
+          message: err.message,
+        };
+      }
+      renderPublishers();
     }
 
     async function loadProfiles() {
@@ -729,6 +807,7 @@
       scheduleForm.addEventListener('submit', submitScheduleForm);
     }
 
+    loadPublishers();
     loadProfiles();
     refreshJobs();
     refreshSchedules();
