@@ -37,6 +37,12 @@ sections:
       - type: iframe
         options: { url: http://backend.liork.cloud/ui/services, height: 760 }
 
+  - name: Money Bots
+    icon: fas fa-robot
+    widgets:
+      - type: iframe
+        options: { url: http://backend.liork.cloud/ui/ai-content, height: 760 }
+
   - name: Files & Tasks
     icon: fas fa-folder-tree
     items:
