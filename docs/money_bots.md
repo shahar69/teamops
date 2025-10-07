@@ -6,6 +6,7 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 
 - **Profiles** capture reusable tone, voice, platform focus, and guardrails. Operators can create, update, and delete them via the UI or `/ai/profiles` endpoints.
 - **Jobs** log every generation run with metadata, generated copy, and current status. They can be queried with `/ai/jobs`.
+- **Schedules** let operators queue previously generated jobs for timed delivery to downstream tooling. They are polled by the backend scheduler and emitted when due.
 - **Generations** call the configured chat completion provider to produce Markdown output that includes hooks, body, captions, and monetization prompts.
 
 ## API surface
@@ -34,6 +35,8 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 | `AI_API_BASE` | Base URL for the chat completions endpoint. | `https://api.openai.com/v1` |
 | `AI_API_KEY` | API key/token for the AI provider. | _empty_ |
 | `AI_TIMEOUT` | Timeout in seconds for the AI call. | `45` |
+| `AI_SCHEDULE_INTERVAL_SECONDS` | Poll interval for the scheduler loop that picks up due items. | `60` |
+| `AI_SCHEDULE_BATCH_SIZE` | Maximum number of due items processed per scheduler tick. | `20` |
 
 ### Publisher credentials
 
