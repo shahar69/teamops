@@ -42,6 +42,12 @@ sections:
     widgets:
       - type: iframe
         options: { url: http://backend.liork.cloud/ui/ai-content, height: 760 }
+      - type: markdown
+        options:
+          content: |
+            ### AI scheduling
+            Generate content now and queue it for later delivery from the Money Bots console.
+            The backend polls every `${AI_SCHEDULE_INTERVAL_SECONDS:-60}` seconds and moves due rows into the outbound queue with audit logs.
 
   - name: Files & Tasks
     icon: fas fa-folder-tree
