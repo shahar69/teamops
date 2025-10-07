@@ -42,6 +42,10 @@ sections:
     widgets:
       - type: iframe
         options: { url: http://backend.liork.cloud/ui/ai-content, height: 760 }
+    items:
+      - title: Content Scheduler
+        url: http://backend.liork.cloud/ui/ai-content#schedule
+        icon: fas fa-calendar-check
 
   - name: Files & Tasks
     icon: fas fa-folder-tree
