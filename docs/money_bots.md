@@ -30,6 +30,18 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 | `AI_API_KEY` | API key/token for the AI provider. | _empty_ |
 | `AI_TIMEOUT` | Timeout in seconds for the AI call. | `45` |
 
+### Publisher credentials
+
+Publisher connectors load credentials from environment variables (or the root `.env.production` file). Prefix everything with `PUBLISHER_` so the scheduler can validate configuration before making API calls.
+
+| Platform | Required variables | Notes |
+| --- | --- | --- |
+| Reddit (script app) | `PUBLISHER_REDDIT_CLIENT_ID`, `PUBLISHER_REDDIT_CLIENT_SECRET`, `PUBLISHER_REDDIT_USERNAME`, `PUBLISHER_REDDIT_PASSWORD`, `PUBLISHER_REDDIT_USER_AGENT` | Uses a personal-use script application with password grant to submit text posts. |
+| Twitter / X | `PUBLISHER_TWITTER_API_KEY`, `PUBLISHER_TWITTER_API_SECRET`, `PUBLISHER_TWITTER_ACCESS_TOKEN`, `PUBLISHER_TWITTER_ACCESS_SECRET`, `PUBLISHER_TWITTER_BEARER_TOKEN` | Requires elevated API v2 access with OAuth 1.0a user context for publishing threads. |
+| YouTube Shorts | `PUBLISHER_YOUTUBE_CLIENT_ID`, `PUBLISHER_YOUTUBE_CLIENT_SECRET`, `PUBLISHER_YOUTUBE_REFRESH_TOKEN`, `PUBLISHER_YOUTUBE_CHANNEL_ID` | Uses the YouTube Data API to upload Shorts under the configured channel. |
+
+Populate `.env.production` with production secrets (see the example committed in the repo) or export them in your deployment environment. The publisher modules read from the process environment first and fall back to this file for local development.
+
 If `AI_API_KEY` is not set, the backend stores a placeholder result and returns status `needs_config` so operators know configuration is required.
 
 ## Prompt design
@@ -45,3 +57,9 @@ Outputs are returned in Markdown with a hook, main body, platform captions, visu
 ## Audit trail
 
 Profile changes, job deletions, and content runs are logged to the existing audit table so leadership can review usage.
+
+## Scheduler and publishing
+
+- Connector modules live in `backend/app/publishers/` and each exposes a `publish(job, schedule)` function. They validate credentials and return structured payloads describing what was posted.
+- `ai_content_schedule` keeps queued publishing jobs with metadata, status, response payloads, and error detail columns. The backend updates rows as runs succeed or fail.
+- Use the `/ai/schedule/run` endpoint (or `/ai/schedule/{id}/run`) to trigger the scheduler manually. The UI exposes health-check buttons so operators can verify that credentials are loaded safely before automating distribution.

@@ -1,5 +1,5 @@
 import os, time, base64, hmac, hashlib, json, sys, traceback
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Any, Dict
 from fastapi import FastAPI, HTTPException, Request, Form, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from passlib.hash import bcrypt
 import httpx
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
+from publishers import (
+    PublisherConfigError,
+    PublisherError,
+    get_publisher,
+    list_publishers,
+)
 
 # ---------- Config ----------
 DATABASE_URL = os.environ["DATABASE_URL"]  # e.g. postgresql+psycopg2://teamops:pass@db:5432/teamops
@@ -130,6 +136,19 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
+        CREATE TABLE IF NOT EXISTS ai_content_schedule(
+            id SERIAL PRIMARY KEY,
+            job_id INTEGER REFERENCES ai_content_jobs(id) ON DELETE CASCADE,
+            platform TEXT NOT NULL,
+            scheduled_for TIMESTAMP NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued',
+            metadata JSONB,
+            response_payload JSONB,
+            error_detail TEXT,
+            last_attempt_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW(),
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
         """))
 init_db()
 
@@ -193,7 +212,6 @@ def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
             "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations.",
             note,
         )
-main
     try:
         url = AI_API_BASE.rstrip('/') + "/chat/completions"
         headers = {
@@ -614,6 +632,213 @@ def ai_generate(req: Request, payload: dict):
         raise HTTPException(500, "job retrieval failed")
     audit(email, "ai:generate", {"job_id": job_id, "title": title, "profile": profile_dict.get("name")})
     return {"job": format_job(row), "note": note}
+
+# ---------- Publishers & Scheduler ----------
+def _coerce_schedule_metadata(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _update_schedule_success(schedule_id: int, payload: Dict[str, Any], status: str = "published") -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE ai_content_schedule
+                SET status=:status,
+                    response_payload=CAST(:payload AS JSONB),
+                    error_detail=NULL,
+                    updated_at=NOW()
+                WHERE id=:id
+                """
+            ),
+            {"id": schedule_id, "status": status, "payload": json.dumps(payload)},
+        )
+
+
+def _update_schedule_failure(schedule_id: int, status: str, error_detail: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE ai_content_schedule
+                SET status=:status,
+                    response_payload=NULL,
+                    error_detail=:error,
+                    updated_at=NOW()
+                WHERE id=:id
+                """
+            ),
+            {"id": schedule_id, "status": status, "error": error_detail[:500]},
+        )
+
+
+def execute_schedule(schedule_id: int, actor_email: Optional[str] = None) -> Dict[str, Any]:
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT id, job_id, platform, status, metadata, scheduled_for
+                FROM ai_content_schedule
+                WHERE id=:id
+                """
+            ),
+            {"id": schedule_id},
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "schedule not found")
+    schedule = dict(row._mapping)
+    schedule["metadata"] = _coerce_schedule_metadata(schedule.get("metadata"))
+    if schedule["status"] not in {"queued", "retry", "running"}:
+        return {
+            "schedule_id": schedule_id,
+            "status": schedule["status"],
+            "skipped": True,
+        }
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                UPDATE ai_content_schedule
+                SET status='running', error_detail=NULL, last_attempt_at=NOW(), updated_at=NOW()
+                WHERE id=:id
+                """
+            ),
+            {"id": schedule_id},
+        )
+    with engine.begin() as conn:
+        job_row = conn.execute(
+            text(
+                """
+                SELECT id, title, generated_content, keywords, brief, data_sources, content_type, profile_id
+                FROM ai_content_jobs
+                WHERE id=:id
+                """
+            ),
+            {"id": schedule["job_id"]},
+        ).fetchone()
+    if not job_row:
+        msg = "Associated job not found"
+        _update_schedule_failure(schedule_id, "error", msg)
+        return {
+            "schedule_id": schedule_id,
+            "status": "error",
+            "error": msg,
+        }
+    job = dict(job_row._mapping)
+    try:
+        publisher = get_publisher(schedule["platform"])
+        result = publisher.publish(job, schedule)
+    except PublisherConfigError as exc:
+        msg = str(exc)
+        _update_schedule_failure(schedule_id, "config_error", msg)
+        if actor_email:
+            audit(actor_email, "ai:schedule:config", {"schedule_id": schedule_id, "error": msg})
+        return {
+            "schedule_id": schedule_id,
+            "status": "config_error",
+            "error": msg,
+        }
+    except PublisherError as exc:
+        msg = str(exc)
+        _update_schedule_failure(schedule_id, "error", msg)
+        if actor_email:
+            audit(actor_email, "ai:schedule:error", {"schedule_id": schedule_id, "error": msg})
+        return {
+            "schedule_id": schedule_id,
+            "status": "error",
+            "error": msg,
+        }
+    except Exception as exc:
+        msg = f"Unexpected error: {exc}"
+        _update_schedule_failure(schedule_id, "error", msg)
+        if actor_email:
+            audit(actor_email, "ai:schedule:error", {"schedule_id": schedule_id, "error": msg})
+        return {
+            "schedule_id": schedule_id,
+            "status": "error",
+            "error": msg,
+        }
+
+    _update_schedule_success(schedule_id, result)
+    if actor_email:
+        audit(
+            actor_email,
+            "ai:schedule:publish",
+            {"schedule_id": schedule_id, "job_id": job["id"], "platform": schedule["platform"]},
+        )
+    return {
+        "schedule_id": schedule_id,
+        "status": "published",
+        "payload": result,
+    }
+
+
+def process_due_schedules(limit: int = 5, actor_email: Optional[str] = None) -> List[Dict[str, Any]]:
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id FROM ai_content_schedule
+                WHERE status IN ('queued','retry')
+                  AND scheduled_for <= NOW()
+                ORDER BY scheduled_for ASC
+                LIMIT :limit
+                """
+            ),
+            {"limit": limit},
+        ).fetchall()
+    results: List[Dict[str, Any]] = []
+    for r in rows:
+        results.append(execute_schedule(r.id, actor_email=actor_email))
+    return results
+
+
+@app.get("/ai/publishers")
+def ai_publishers(req: Request):
+    _uid, email, role = require_user(req)
+    return {"publishers": list_publishers()}
+
+
+@app.post("/ai/publishers/{platform}/health")
+def ai_publisher_health(req: Request, platform: str):
+    _uid, email, role = require_user(req)
+    try:
+        module = get_publisher(platform)
+    except PublisherError as exc:
+        raise HTTPException(404, str(exc))
+    try:
+        checker = getattr(module, "health_check", None)
+        if callable(checker):
+            result = checker()
+        else:
+            result = {"success": True, "message": "No health check implemented."}
+    except PublisherConfigError as exc:
+        raise HTTPException(400, str(exc))
+    except PublisherError as exc:
+        raise HTTPException(400, str(exc))
+    return {"platform": module.SLUG, "result": result}
+
+
+@app.post("/ai/schedule/run")
+def ai_schedule_run(req: Request, limit: int = Query(5, ge=1, le=50)):
+    _uid, email, role = require_user(req)
+    results = process_due_schedules(limit=limit, actor_email=email)
+    return {"results": results}
+
+
+@app.post("/ai/schedule/{schedule_id}/run")
+def ai_schedule_run_single(req: Request, schedule_id: int):
+    _uid, email, role = require_user(req)
+    return execute_schedule(schedule_id, actor_email=email)
 
 # ---------- Proxmox helpers ----------
 def pve_headers():
