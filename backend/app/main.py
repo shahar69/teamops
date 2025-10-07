@@ -1,5 +1,6 @@
 import os, time, base64, hmac, hashlib, json, sys, traceback
-from typing import Optional, List, Tuple, Any, Dict
+from datetime import datetime, timezone
+from typing import Optional, List, Tuple
 from fastapi import FastAPI, HTTPException, Request, Form, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -136,16 +137,15 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
-        CREATE TABLE IF NOT EXISTS ai_content_schedule(
+        CREATE TABLE IF NOT EXISTS ai_content_schedules(
             id SERIAL PRIMARY KEY,
             job_id INTEGER REFERENCES ai_content_jobs(id) ON DELETE CASCADE,
             platform TEXT NOT NULL,
             scheduled_for TIMESTAMP NOT NULL,
-            status TEXT NOT NULL DEFAULT 'queued',
-            metadata JSONB,
-            response_payload JSONB,
-            error_detail TEXT,
-            last_attempt_at TIMESTAMP,
+            status TEXT NOT NULL DEFAULT 'scheduled',
+            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+            last_attempted_at TIMESTAMP,
+            result TEXT,
             created_at TIMESTAMP DEFAULT NOW(),
             updated_at TIMESTAMP DEFAULT NOW()
         );
@@ -263,6 +263,7 @@ def format_job(row) -> dict:
         "id": row.id,
         "profile_id": row.profile_id,
         "profile_name": row.profile_name or "",
+        "profile_platform": getattr(row, "profile_platform", "") or "",
         "title": row.title,
         "keywords": row.keywords or "",
         "brief": row.brief or "",
@@ -273,6 +274,68 @@ def format_job(row) -> dict:
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
+
+SCHEDULE_COLUMNS = """
+    s.id,
+    s.job_id,
+    j.title AS job_title,
+    j.content_type AS job_content_type,
+    COALESCE(p.name, '') AS job_profile_name,
+    COALESCE(p.target_platform, '') AS job_profile_platform,
+    s.platform,
+    s.status,
+    TO_CHAR(s.scheduled_for, 'YYYY-MM-DD HH24:MI') AS scheduled_for,
+    TO_CHAR(s.scheduled_for, 'YYYY-MM-DD"T"HH24:MI') AS scheduled_for_iso,
+    TO_CHAR(s.created_at, 'YYYY-MM-DD HH24:MI') AS created_at,
+    TO_CHAR(s.updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at,
+    TO_CHAR(s.last_attempted_at, 'YYYY-MM-DD HH24:MI') AS last_attempted_at,
+    COALESCE(s.result, '') AS result
+"""
+
+SCHEDULE_SELECT_BASE = f"""
+    SELECT {SCHEDULE_COLUMNS}
+    FROM ai_content_schedules s
+    JOIN ai_content_jobs j ON j.id = s.job_id
+    LEFT JOIN ai_content_profiles p ON p.id = j.profile_id
+"""
+
+SCHEDULE_STATUSES = {"scheduled", "posted", "failed", "canceled"}
+
+
+def format_schedule(row) -> dict:
+    return {
+        "id": row.id,
+        "job_id": row.job_id,
+        "job_title": row.job_title,
+        "job_content_type": row.job_content_type or "",
+        "job_profile_name": row.job_profile_name or "",
+        "job_profile_platform": row.job_profile_platform or "",
+        "platform": row.platform,
+        "status": row.status,
+        "scheduled_for": row.scheduled_for,
+        "scheduled_for_iso": row.scheduled_for_iso,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "last_attempted_at": row.last_attempted_at,
+        "result": row.result or "",
+    }
+
+
+def parse_schedule_time(value: str) -> datetime:
+    if not value:
+        raise HTTPException(400, "schedule time required")
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(400, "invalid schedule time")
+    if parsed.tzinfo:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def fetch_schedule(conn, schedule_id: int):
+    return conn.execute(text(SCHEDULE_SELECT_BASE + " WHERE s.id=:id"), {"id": schedule_id}).fetchone()
 
 CONTENT_BLUEPRINTS = {
     "social-post": "Craft a set of 3 platform-ready social media posts (TikTok, Instagram Reels, Twitter/X). Each should have a hook, supporting body, and CTA. Include relevant hashtags.",
@@ -513,7 +576,8 @@ def ai_profile_delete(req: Request, profile_id: int):
 def ai_jobs(req: Request, profile_id: Optional[int] = Query(None), limit: int = Query(20, ge=1, le=100)):
     _uid, email, role = require_user(req)
     base_sql = (
-        "SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, j.title, j.keywords, j.brief, j.data_sources, "
+        "SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, COALESCE(p.target_platform,'') AS profile_platform, "
+        "j.title, j.keywords, j.brief, j.data_sources, "
         "j.content_type, j.generated_content, j.status, "
         "TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at, TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at "
         "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id"
@@ -533,7 +597,9 @@ def ai_job_detail(req: Request, job_id: int):
     with engine.begin() as conn:
         row = conn.execute(text(
             """
-            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, j.title, j.keywords,
+            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name,
+                   COALESCE(p.target_platform,'') AS profile_platform,
+                   j.title, j.keywords,
                    j.brief, j.data_sources, j.content_type, j.generated_content, j.status,
                    TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
                    TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
@@ -620,7 +686,9 @@ def ai_generate(req: Request, payload: dict):
         ), {"id": job_id, "content": generated, "status": status})
         row = conn.execute(text(
             """
-            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, j.title, j.keywords,
+            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name,
+                   COALESCE(p.target_platform,'') AS profile_platform,
+                   j.title, j.keywords,
                    j.brief, j.data_sources, j.content_type, j.generated_content, j.status,
                    TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
                    TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
@@ -633,212 +701,127 @@ def ai_generate(req: Request, payload: dict):
     audit(email, "ai:generate", {"job_id": job_id, "title": title, "profile": profile_dict.get("name")})
     return {"job": format_job(row), "note": note}
 
-# ---------- Publishers & Scheduler ----------
-def _coerce_schedule_metadata(value: Any) -> Dict[str, Any]:
-    if value is None:
-        return {}
-    if isinstance(value, dict):
-        return value
-    if isinstance(value, str):
-        try:
-            return json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-    return {}
 
-
-def _update_schedule_success(schedule_id: int, payload: Dict[str, Any], status: str = "published") -> None:
+@app.get("/ai/schedule")
+def ai_schedule_list(req: Request, status: Optional[str] = Query(None)):
+    _uid, email, role = require_user(req)
+    where = ""
+    params = {}
+    if status:
+        normalized = status.strip().lower()
+        if normalized not in SCHEDULE_STATUSES:
+            raise HTTPException(400, "invalid status filter")
+        where = " WHERE s.status=:status"
+        params["status"] = normalized
+    sql = SCHEDULE_SELECT_BASE + where + " ORDER BY s.scheduled_for ASC, s.id ASC"
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                UPDATE ai_content_schedule
-                SET status=:status,
-                    response_payload=CAST(:payload AS JSONB),
-                    error_detail=NULL,
-                    updated_at=NOW()
-                WHERE id=:id
-                """
-            ),
-            {"id": schedule_id, "status": status, "payload": json.dumps(payload)},
-        )
+        rows = conn.execute(text(sql), params).fetchall()
+    return {"schedules": [format_schedule(r) for r in rows]}
 
 
-def _update_schedule_failure(schedule_id: int, status: str, error_detail: str) -> None:
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                UPDATE ai_content_schedule
-                SET status=:status,
-                    response_payload=NULL,
-                    error_detail=:error,
-                    updated_at=NOW()
-                WHERE id=:id
-                """
-            ),
-            {"id": schedule_id, "status": status, "error": error_detail[:500]},
-        )
-
-
-def execute_schedule(schedule_id: int, actor_email: Optional[str] = None) -> Dict[str, Any]:
-    with engine.begin() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT id, job_id, platform, status, metadata, scheduled_for
-                FROM ai_content_schedule
-                WHERE id=:id
-                """
-            ),
-            {"id": schedule_id},
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "schedule not found")
-    schedule = dict(row._mapping)
-    schedule["metadata"] = _coerce_schedule_metadata(schedule.get("metadata"))
-    if schedule["status"] not in {"queued", "retry", "running"}:
-        return {
-            "schedule_id": schedule_id,
-            "status": schedule["status"],
-            "skipped": True,
-        }
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                UPDATE ai_content_schedule
-                SET status='running', error_detail=NULL, last_attempt_at=NOW(), updated_at=NOW()
-                WHERE id=:id
-                """
-            ),
-            {"id": schedule_id},
-        )
-    with engine.begin() as conn:
-        job_row = conn.execute(
-            text(
-                """
-                SELECT id, title, generated_content, keywords, brief, data_sources, content_type, profile_id
-                FROM ai_content_jobs
-                WHERE id=:id
-                """
-            ),
-            {"id": schedule["job_id"]},
-        ).fetchone()
-    if not job_row:
-        msg = "Associated job not found"
-        _update_schedule_failure(schedule_id, "error", msg)
-        return {
-            "schedule_id": schedule_id,
-            "status": "error",
-            "error": msg,
-        }
-    job = dict(job_row._mapping)
+@app.post("/ai/schedule")
+def ai_schedule_create(req: Request, payload: dict):
+    uid, email, role = require_user(req)
     try:
-        publisher = get_publisher(schedule["platform"])
-        result = publisher.publish(job, schedule)
-    except PublisherConfigError as exc:
-        msg = str(exc)
-        _update_schedule_failure(schedule_id, "config_error", msg)
-        if actor_email:
-            audit(actor_email, "ai:schedule:config", {"schedule_id": schedule_id, "error": msg})
-        return {
-            "schedule_id": schedule_id,
-            "status": "config_error",
-            "error": msg,
-        }
-    except PublisherError as exc:
-        msg = str(exc)
-        _update_schedule_failure(schedule_id, "error", msg)
-        if actor_email:
-            audit(actor_email, "ai:schedule:error", {"schedule_id": schedule_id, "error": msg})
-        return {
-            "schedule_id": schedule_id,
-            "status": "error",
-            "error": msg,
-        }
-    except Exception as exc:
-        msg = f"Unexpected error: {exc}"
-        _update_schedule_failure(schedule_id, "error", msg)
-        if actor_email:
-            audit(actor_email, "ai:schedule:error", {"schedule_id": schedule_id, "error": msg})
-        return {
-            "schedule_id": schedule_id,
-            "status": "error",
-            "error": msg,
-        }
-
-    _update_schedule_success(schedule_id, result)
-    if actor_email:
-        audit(
-            actor_email,
-            "ai:schedule:publish",
-            {"schedule_id": schedule_id, "job_id": job["id"], "platform": schedule["platform"]},
-        )
-    return {
-        "schedule_id": schedule_id,
-        "status": "published",
-        "payload": result,
-    }
-
-
-def process_due_schedules(limit: int = 5, actor_email: Optional[str] = None) -> List[Dict[str, Any]]:
+        job_id = int(payload.get("job_id"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "job_id required")
+    platform = (payload.get("platform") or "").strip()
+    if not platform:
+        raise HTTPException(400, "platform required")
+    scheduled_for_raw = (payload.get("scheduled_for") or "").strip()
+    scheduled_for = parse_schedule_time(scheduled_for_raw)
     with engine.begin() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT id FROM ai_content_schedule
-                WHERE status IN ('queued','retry')
-                  AND scheduled_for <= NOW()
-                ORDER BY scheduled_for ASC
-                LIMIT :limit
-                """
-            ),
-            {"limit": limit},
-        ).fetchall()
-    results: List[Dict[str, Any]] = []
-    for r in rows:
-        results.append(execute_schedule(r.id, actor_email=actor_email))
-    return results
+        job_row = conn.execute(text("SELECT id FROM ai_content_jobs WHERE id=:id"), {"id": job_id}).fetchone()
+        if not job_row:
+            raise HTTPException(404, "job not found")
+        inserted = conn.execute(text(
+            """
+            INSERT INTO ai_content_schedules(job_id, platform, scheduled_for, status, created_by)
+            VALUES (:job_id, :platform, :scheduled_for, 'scheduled', :created_by)
+            RETURNING id
+            """
+        ), {
+            "job_id": job_id,
+            "platform": platform,
+            "scheduled_for": scheduled_for,
+            "created_by": uid,
+        }).fetchone()
+        schedule_row = fetch_schedule(conn, inserted.id)
+    if not schedule_row:
+        raise HTTPException(500, "schedule create failed")
+    audit(email, "ai:schedule:create", {"job_id": job_id, "schedule_id": schedule_row.id, "platform": platform})
+    return {"schedule": format_schedule(schedule_row)}
 
 
-@app.get("/ai/publishers")
-def ai_publishers(req: Request):
-    _uid, email, role = require_user(req)
-    return {"publishers": list_publishers()}
+@app.put("/ai/schedule/{schedule_id}")
+def ai_schedule_update(req: Request, schedule_id: int, payload: dict):
+    uid, email, role = require_user(req)
+    platform_raw = payload.get("platform") if isinstance(payload, dict) else None
+    scheduled_for_raw = payload.get("scheduled_for") if isinstance(payload, dict) else None
+    updates = []
+    params = {"id": schedule_id}
+    with engine.begin() as conn:
+        existing = conn.execute(text("SELECT status FROM ai_content_schedules WHERE id=:id"), {"id": schedule_id}).fetchone()
+        if not existing:
+            raise HTTPException(404, "schedule not found")
+        new_status = existing.status
+        if platform_raw is not None:
+            platform = platform_raw.strip()
+            if not platform:
+                raise HTTPException(400, "platform cannot be empty")
+            updates.append("platform=:platform")
+            params["platform"] = platform
+        if scheduled_for_raw is not None:
+            parsed_time = parse_schedule_time(str(scheduled_for_raw))
+            updates.append("scheduled_for=:scheduled_for")
+            params["scheduled_for"] = parsed_time
+            new_status = "scheduled"
+        if new_status != existing.status:
+            updates.append("status=:status")
+            params["status"] = new_status
+        if not updates:
+            raise HTTPException(400, "no changes provided")
+        updates.append("updated_at=NOW()")
+        sql = "UPDATE ai_content_schedules SET " + ", ".join(updates) + " WHERE id=:id"
+        res = conn.execute(text(sql), params)
+        if res.rowcount == 0:
+            raise HTTPException(404, "schedule not found")
+        schedule_row = fetch_schedule(conn, schedule_id)
+    audit(email, "ai:schedule:update", {"schedule_id": schedule_id})
+    return {"schedule": format_schedule(schedule_row)}
 
 
-@app.post("/ai/publishers/{platform}/health")
-def ai_publisher_health(req: Request, platform: str):
-    _uid, email, role = require_user(req)
-    try:
-        module = get_publisher(platform)
-    except PublisherError as exc:
-        raise HTTPException(404, str(exc))
-    try:
-        checker = getattr(module, "health_check", None)
-        if callable(checker):
-            result = checker()
-        else:
-            result = {"success": True, "message": "No health check implemented."}
-    except PublisherConfigError as exc:
-        raise HTTPException(400, str(exc))
-    except PublisherError as exc:
-        raise HTTPException(400, str(exc))
-    return {"platform": module.SLUG, "result": result}
+@app.post("/ai/schedule/{schedule_id}/cancel")
+def ai_schedule_cancel(req: Request, schedule_id: int):
+    uid, email, role = require_user(req)
+    with engine.begin() as conn:
+        res = conn.execute(text(
+            "UPDATE ai_content_schedules SET status='canceled', updated_at=NOW() WHERE id=:id"
+        ), {"id": schedule_id})
+        if res.rowcount == 0:
+            raise HTTPException(404, "schedule not found")
+        schedule_row = fetch_schedule(conn, schedule_id)
+    audit(email, "ai:schedule:cancel", {"schedule_id": schedule_id})
+    return {"schedule": format_schedule(schedule_row)}
 
 
-@app.post("/ai/schedule/run")
-def ai_schedule_run(req: Request, limit: int = Query(5, ge=1, le=50)):
-    _uid, email, role = require_user(req)
-    results = process_due_schedules(limit=limit, actor_email=email)
-    return {"results": results}
-
-
-@app.post("/ai/schedule/{schedule_id}/run")
-def ai_schedule_run_single(req: Request, schedule_id: int):
-    _uid, email, role = require_user(req)
-    return execute_schedule(schedule_id, actor_email=email)
+@app.post("/ai/schedule/{schedule_id}/retry")
+def ai_schedule_retry(req: Request, schedule_id: int):
+    uid, email, role = require_user(req)
+    with engine.begin() as conn:
+        res = conn.execute(text(
+            """
+            UPDATE ai_content_schedules
+            SET status='scheduled', last_attempted_at=NULL, updated_at=NOW()
+            WHERE id=:id
+            """
+        ), {"id": schedule_id})
+        if res.rowcount == 0:
+            raise HTTPException(404, "schedule not found")
+        schedule_row = fetch_schedule(conn, schedule_id)
+    audit(email, "ai:schedule:retry", {"schedule_id": schedule_id})
+    return {"schedule": format_schedule(schedule_row)}
 
 # ---------- Proxmox helpers ----------
 def pve_headers():

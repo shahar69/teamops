@@ -20,6 +20,11 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 | `/ai/jobs/{id}` | GET | Retrieve job details. |
 | `/ai/jobs/{id}` | DELETE | Delete a job log entry. |
 | `/ai/content` | POST | Trigger a new generation run. |
+| `/ai/schedule` | GET | List scheduled deliveries (optionally filtered by status). |
+| `/ai/schedule` | POST | Create a scheduled drop for a job. |
+| `/ai/schedule/{id}` | PUT | Update the platform or run time for a scheduled drop. |
+| `/ai/schedule/{id}/cancel` | POST | Cancel a scheduled delivery. |
+| `/ai/schedule/{id}/retry` | POST | Retry a failed or canceled delivery. |
 
 ## Environment variables
 
@@ -58,8 +63,10 @@ Outputs are returned in Markdown with a hook, main body, platform captions, visu
 
 Profile changes, job deletions, and content runs are logged to the existing audit table so leadership can review usage.
 
-## Scheduler and publishing
+## Scheduling dashboard
 
-- Connector modules live in `backend/app/publishers/` and each exposes a `publish(job, schedule)` function. They validate credentials and return structured payloads describing what was posted.
-- `ai_content_schedule` keeps queued publishing jobs with metadata, status, response payloads, and error detail columns. The backend updates rows as runs succeed or fail.
-- Use the `/ai/schedule/run` endpoint (or `/ai/schedule/{id}/run`) to trigger the scheduler manually. The UI exposes health-check buttons so operators can verify that credentials are loaded safely before automating distribution.
+The Money Bots UI includes a **Publishing schedule** panel that groups upcoming
+deliveries by platform and status. Operators can launch the scheduler directly
+from any generated job, then reschedule, cancel, or retry failed drops inline.
+The same API endpoints documented above power external integrations, making it
+easy to plug the automation flow into other calendaring or posting tools.
