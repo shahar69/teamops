@@ -19,6 +19,7 @@ nextcloud_db_data/
 # Local env
 .env
 .env.*
+!.env.production
 secrets/
 .DS_Store
 
@@ -35,5 +36,6 @@ nextcloud_data/
 nextcloud_db_data/
 .env
 .env.*
+!.env.production
 secrets/
 .DS_Store

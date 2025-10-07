@@ -21,9 +21,11 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 | `/ai/jobs/{id}` | GET | Retrieve job details. |
 | `/ai/jobs/{id}` | DELETE | Delete a job log entry. |
 | `/ai/content` | POST | Trigger a new generation run. |
-| `/ai/schedule` | GET | List scheduled deliveries (filterable by `job_id` or `status`). |
-| `/ai/schedule` | POST | Schedule a previously generated job for future delivery. |
-| `/ai/schedule/{id}` | DELETE | Cancel a pending or queued schedule entry without removing the job. |
+| `/ai/schedule` | GET | List scheduled deliveries (optionally filtered by status). |
+| `/ai/schedule` | POST | Create a scheduled drop for a job. |
+| `/ai/schedule/{id}` | PUT | Update the platform or run time for a scheduled drop. |
+| `/ai/schedule/{id}/cancel` | POST | Cancel a scheduled delivery. |
+| `/ai/schedule/{id}/retry` | POST | Retry a failed or canceled delivery. |
 
 ## Environment variables
 
@@ -35,6 +37,18 @@ The Money Bots unit adds an AI-assisted workspace for spinning up social posts, 
 | `AI_TIMEOUT` | Timeout in seconds for the AI call. | `45` |
 | `AI_SCHEDULE_INTERVAL_SECONDS` | Poll interval for the scheduler loop that picks up due items. | `60` |
 | `AI_SCHEDULE_BATCH_SIZE` | Maximum number of due items processed per scheduler tick. | `20` |
+
+### Publisher credentials
+
+Publisher connectors load credentials from environment variables (or the root `.env.production` file). Prefix everything with `PUBLISHER_` so the scheduler can validate configuration before making API calls.
+
+| Platform | Required variables | Notes |
+| --- | --- | --- |
+| Reddit (script app) | `PUBLISHER_REDDIT_CLIENT_ID`, `PUBLISHER_REDDIT_CLIENT_SECRET`, `PUBLISHER_REDDIT_USERNAME`, `PUBLISHER_REDDIT_PASSWORD`, `PUBLISHER_REDDIT_USER_AGENT` | Uses a personal-use script application with password grant to submit text posts. |
+| Twitter / X | `PUBLISHER_TWITTER_API_KEY`, `PUBLISHER_TWITTER_API_SECRET`, `PUBLISHER_TWITTER_ACCESS_TOKEN`, `PUBLISHER_TWITTER_ACCESS_SECRET`, `PUBLISHER_TWITTER_BEARER_TOKEN` | Requires elevated API v2 access with OAuth 1.0a user context for publishing threads. |
+| YouTube Shorts | `PUBLISHER_YOUTUBE_CLIENT_ID`, `PUBLISHER_YOUTUBE_CLIENT_SECRET`, `PUBLISHER_YOUTUBE_REFRESH_TOKEN`, `PUBLISHER_YOUTUBE_CHANNEL_ID` | Uses the YouTube Data API to upload Shorts under the configured channel. |
+
+Populate `.env.production` with production secrets (see the example committed in the repo) or export them in your deployment environment. The publisher modules read from the process environment first and fall back to this file for local development.
 
 If `AI_API_KEY` is not set, the backend stores a placeholder result and returns status `needs_config` so operators know configuration is required.
 
@@ -50,16 +64,12 @@ Outputs are returned in Markdown with a hook, main body, platform captions, visu
 
 ## Audit trail
 
-Profile changes, job deletions, content runs, and schedule lifecycle events (create/cancel plus automated state transitions) are logged to the existing audit table so leadership can review usage.
+Profile changes, job deletions, and content runs are logged to the existing audit table so leadership can review usage.
 
-## Scheduling lifecycle
+## Scheduling dashboard
 
-The scheduler runs inside the FastAPI app using a lightweight async background task. Every `AI_SCHEDULE_INTERVAL_SECONDS`, it looks for rows in `ai_content_schedule` with `status = 'pending'` and a `publish_at` timestamp that has passed. Matching rows are atomically flipped to `queued` along with delivery metadata (e.g., last enqueue time). Failures move the row to `error` and capture the exception string in the metadata blob for later review.
-
-Operators can:
-
-- Create a schedule by POSTing `job_id`, `platform`, and `publish_at` (ISO8601) to `/ai/schedule`.
-- List schedules, filtering by status or job, to monitor queued work.
-- Cancel pending/queued schedules via `DELETE /ai/schedule/{id}`, which preserves the job but marks the row as `canceled` and records who performed the action.
-
-Because deliveries are tracked in the shared table, downstream workers can safely pick up queued rows without risking double-processing thanks to the `FOR UPDATE SKIP LOCKED` semantics used during dispatch.
+The Money Bots UI includes a **Publishing schedule** panel that groups upcoming
+deliveries by platform and status. Operators can launch the scheduler directly
+from any generated job, then reschedule, cancel, or retry failed drops inline.
+The same API endpoints documented above power external integrations, making it
+easy to plug the automation flow into other calendaring or posting tools.

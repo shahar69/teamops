@@ -42,7 +42,9 @@ are documented in [`docs/deploy_vm_192.168.1.22.md`](docs/deploy_vm_192.168.1.22
 Money Bots profiles and automation capabilities are covered in
 [`docs/money_bots.md`](docs/money_bots.md). The Dashy tile opens the same UI at
 `/ui/ai-content`, letting you create, edit, and trigger content jobs from the
-dashboard once the backend is up.
+dashboard once the backend is up. The same view now includes a publishing
+schedule board so operators can review upcoming drops and reschedule or cancel
+them without leaving the automation workspace.
 
 ## Additional documentation
 

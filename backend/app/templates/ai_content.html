@@ -23,22 +23,56 @@
     .chip{background:#1e293b;padding:4px 8px;border-radius:999px;font-size:0.8rem}
     .profile-card{padding:14px;background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;margin-top:12px}
     .profile-card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+    .publisher-card{padding:14px;background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;margin-top:12px}
+    .publisher-card header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
     .status{display:inline-flex;align-items:center;gap:6px;font-size:0.85rem}
     .status.ready{color:#4ade80}
     .status.needs_config{color:#facc15}
     .status.error{color:#f87171}
+    .status.muted{color:#94a3b8}
     .job{background:#0f172a;border-radius:12px;border:1px solid #1f2a3a;padding:14px;margin-top:12px}
     pre{white-space:pre-wrap;word-wrap:break-word;background:#0b1220;border-radius:12px;padding:12px;margin-top:12px;font-size:0.9rem}
     .list-header{display:flex;justify-content:space-between;align-items:center}
     .small{font-size:0.8rem;color:#94a3b8}
     .actions button{margin-right:8px}
     .inline{display:inline-flex;gap:8px;align-items:center}
+    .schedule-grid{display:grid;gap:16px;margin-top:12px}
+    .schedule-platform{background:#0f172a;border:1px solid #1f2a3a;border-radius:12px;padding:14px}
+    .schedule-platform header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+    .schedule-statuses{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+    .schedule-status-group{background:#0b1220;border-radius:12px;padding:12px;border:1px solid #1f2a3a}
+    .schedule-status-title{font-size:0.8rem;text-transform:uppercase;color:#94a3b8;margin-bottom:8px}
+    .schedule-entry{background:#0f172a;border-radius:10px;padding:10px;margin-bottom:8px;border:1px solid #1f2a3a}
+    .schedule-entry strong{display:block;margin-bottom:4px}
+    .schedule-entry .actions{margin-top:8px}
+    .schedule-entry .actions button{margin-right:6px;margin-top:0}
+    .status.badge{padding:2px 8px;border-radius:999px;font-size:0.75rem;background:#1e293b}
+    .status.scheduled{color:#60a5fa}
+    .status.posted{color:#4ade80}
+    .status.failed{color:#f87171}
+    .status.canceled{color:#94a3b8}
+    .modal-backdrop{position:fixed;inset:0;background:rgba(15,23,42,0.75);display:none;z-index:40}
+    .modal-backdrop.active{display:block}
+    .modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:50;padding:20px}
+    .modal.active{display:flex}
+    .modal .modal-content{background:#111923;border-radius:14px;padding:20px;width:100%;max-width:420px;box-shadow:0 20px 60px rgba(8,15,25,0.6)}
+    .modal .modal-content h3{margin-bottom:12px}
+    .hidden{display:none}
+    .schedule-board-header{display:flex;justify-content:space-between;align-items:center}
+    .schedule-board-actions button{margin-top:0;margin-left:8px}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>Money Making Bots</h1>
     <p class="muted">Build reusable voices and spin up social content, Reddit-style stories, or short-form video scripts on demand. Profiles capture tone, voice, and platform targets so every drop stays on-brand.</p>
+
+    <section class="panel">
+      <h3>0 · Platform connectors</h3>
+      <p class="muted">Load API keys in <code>.env.production</code> and run health checks before flipping on automation.</p>
+      <div id="publishersEmpty" class="muted" style="margin-top:12px;display:none">No publisher connectors detected.</div>
+      <div id="publishersList"></div>
+    </section>
 
     <div class="grid two">
       <section class="panel">
@@ -111,13 +145,104 @@
       <div id="jobsEmpty" class="muted" style="margin-top:12px;display:none">No generations yet. Launch one above.</div>
       <div id="jobsList"></div>
     </section>
+
+    <section class="panel" style="margin-top:18px">
+      <div class="schedule-board-header">
+        <h3>4 · Publishing schedule</h3>
+        <div class="schedule-board-actions">
+          <button type="button" class="secondary" onclick="refreshSchedules()">Refresh</button>
+        </div>
+      </div>
+      <div class="small" style="margin-top:4px">Track upcoming drops grouped by platform and delivery status.</div>
+      <div id="scheduleEmpty" class="muted" style="margin-top:12px;display:none">No scheduled deliveries yet.</div>
+      <div id="scheduleBoard" class="schedule-grid"></div>
+    </section>
+  </div>
+  <div id="scheduleBackdrop" class="modal-backdrop"></div>
+  <div id="scheduleModal" class="modal">
+    <div class="modal-content">
+      <h3 id="scheduleModalTitle">Schedule delivery</h3>
+      <form id="scheduleForm">
+        <input type="hidden" id="schedule_job_id">
+        <input type="hidden" id="schedule_edit_id">
+        <label for="schedule_platform">Platform</label>
+        <input id="schedule_platform" placeholder="TikTok · Instagram" required>
+        <label for="schedule_time">Run at</label>
+        <input id="schedule_time" type="datetime-local" required>
+        <div class="flex">
+          <button type="submit">Save</button>
+          <button type="button" class="secondary" onclick="closeScheduleModal()">Cancel</button>
+        </div>
+        <div class="small muted" id="schedule_form_note" style="margin-top:8px"></div>
+      </form>
+    </div>
   </div>
   <script>
     const esc = (value) => String(value ?? '').replace(/[&<>]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+    let publishers = [];
     let profiles = [];
     let jobs = [];
+    let schedules = [];
     const profileSelect = document.getElementById('gen_profile');
     profileSelect.innerHTML = '<option value="">(loading profiles...)</option>';
+    const scheduleModal = document.getElementById('scheduleModal');
+    const scheduleBackdrop = document.getElementById('scheduleBackdrop');
+    const scheduleForm = document.getElementById('scheduleForm');
+    const scheduleStatusLabels = {
+      scheduled: 'Scheduled',
+      posted: 'Posted',
+      failed: 'Failed',
+      canceled: 'Canceled',
+    };
+
+    function derivePrimaryPlatform(raw) {
+      if (!raw) return '';
+      const pieces = String(raw)
+        .split(/[·,\\/|]/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+      return pieces[0] || '';
+    }
+
+    function formatDisplayTime(iso) {
+      if (!iso) return '';
+      let normalized = iso;
+      if (normalized.length === 16) {
+        normalized = `${normalized}:00`;
+      }
+      const dt = new Date(normalized);
+      if (Number.isNaN(dt.getTime())) {
+        return iso.replace('T', ' ');
+      }
+      return dt.toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    }
+
+    function updateJobScheduleSummary(el, jobId) {
+      const jobSchedules = schedules.filter((item) => Number(item.job_id) === Number(jobId));
+      if (!jobSchedules.length) {
+        el.textContent = 'No scheduled deliveries yet.';
+        return;
+      }
+      const counts = {};
+      jobSchedules.forEach((item) => {
+        const status = item.status || 'scheduled';
+        counts[status] = (counts[status] || 0) + 1;
+      });
+      const parts = Object.entries(counts).map(([status, count]) => `${scheduleStatusLabels[status] || status}: ${count}`);
+      const upcoming = jobSchedules
+        .filter((item) => item.status === 'scheduled')
+        .sort((a, b) => (a.scheduled_for_iso || '').localeCompare(b.scheduled_for_iso || ''))[0];
+      let msg = `Schedules → ${parts.join(', ')}`;
+      if (upcoming) {
+        msg += ` · Next drop ${formatDisplayTime(upcoming.scheduled_for_iso)}`;
+      }
+      el.textContent = msg;
+    }
 
     async function fetchJSON(url, options) {
       const res = await fetch(url, options);
@@ -126,6 +251,73 @@
         throw new Error(text || (res.status + ' ' + res.statusText));
       }
       return await res.json();
+    }
+
+    async function loadPublishers() {
+      try {
+        const data = await fetchJSON('/ai/publishers');
+        publishers = data.publishers || [];
+        renderPublishers();
+      } catch (err) {
+        console.error('Publishers load failed', err);
+        const empty = document.getElementById('publishersEmpty');
+        empty.style.display = 'block';
+        empty.textContent = 'Failed to load publishers: ' + err.message;
+      }
+    }
+
+    function renderPublishers() {
+      const wrap = document.getElementById('publishersList');
+      wrap.innerHTML = '';
+      const empty = document.getElementById('publishersEmpty');
+      if (!publishers.length) {
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      publishers.forEach((p) => {
+        const card = document.createElement('div');
+        card.className = 'publisher-card';
+        const status = publisherStates[p.slug];
+        const statusClass = status ? (status.ok ? 'ready' : 'error') : 'muted';
+        const statusLabel = status ? status.message : 'No health check run yet';
+        const required = (p.required_env || []).map((item) => `<span class="chip">${esc(item)}</span>`).join(' ');
+        card.innerHTML = `
+          <header>
+            <div>
+              <strong>${esc(p.display_name || p.slug)}</strong>
+              <div class="small">${esc(p.description || '')}</div>
+            </div>
+            <button class="secondary" type="button" onclick="checkPublisher('${esc(p.slug)}')">Run health check</button>
+          </header>
+          <div class="small">Required env: ${required || '—'}</div>
+          ${p.notes ? `<div class="small" style="margin-top:8px">${esc(p.notes)}</div>` : ''}
+          <div class="small status ${statusClass}" id="publisher-status-${esc(p.slug)}">${esc(statusLabel)}</div>
+        `;
+        wrap.appendChild(card);
+      });
+    }
+
+    async function checkPublisher(slug) {
+      const statusEl = document.getElementById(`publisher-status-${slug}`);
+      if (statusEl) {
+        statusEl.textContent = 'Checking...';
+        statusEl.className = 'small status';
+      }
+      try {
+        const data = await fetchJSON(`/ai/publishers/${slug}/health`, { method: 'POST' });
+        const result = data.result || {};
+        publisherStates[slug] = {
+          ok: Boolean(result.success),
+          message: result.message || 'Check complete',
+        };
+      } catch (err) {
+        publisherStates[slug] = {
+          ok: false,
+          message: err.message,
+        };
+      }
+      renderPublishers();
     }
 
     async function loadProfiles() {
@@ -284,6 +476,22 @@
       }
     }
 
+    async function refreshSchedules() {
+      try {
+        const data = await fetchJSON('/ai/schedule');
+        schedules = data.schedules || [];
+        renderScheduleBoard();
+        renderJobs();
+      } catch (err) {
+        console.error('Schedules load failed', err);
+        const empty = document.getElementById('scheduleEmpty');
+        if (empty) {
+          empty.style.display = 'block';
+          empty.textContent = 'Failed to load schedules: ' + err.message;
+        }
+      }
+    }
+
     function renderJobs() {
       const wrap = document.getElementById('jobsList');
       wrap.innerHTML = '';
@@ -296,6 +504,8 @@
       jobs.forEach((j) => {
         const div = document.createElement('div');
         div.className = 'job';
+        const primaryPlatform = derivePrimaryPlatform(j.profile_platform);
+        const buttonLabel = primaryPlatform ? `Schedule for ${primaryPlatform}` : 'Schedule post';
         div.innerHTML = `
           <div class="inline">
             <strong>${esc(j.title)}</strong>
@@ -305,17 +515,265 @@
           <div class="small">Ran ${esc(j.updated_at || j.created_at || '')}</div>
           <div class="status ${esc(j.status)}">Status: ${esc(j.status)}</div>
           <div class="small" style="margin-top:8px">Keywords: ${esc(j.keywords || '—')}</div>
+          <div class="small job-schedule-summary" style="margin-top:8px"></div>
+          <div class="actions" style="margin-top:10px">
+            <button type="button" class="schedule-trigger">${esc(buttonLabel)}</button>
+          </div>
           <details style="margin-top:10px">
             <summary class="small">View output</summary>
             <pre>${esc(j.generated_content || '')}</pre>
           </details>
         `;
         wrap.appendChild(div);
+        const summaryEl = div.querySelector('.job-schedule-summary');
+        if (summaryEl) {
+          updateJobScheduleSummary(summaryEl, j.id);
+        }
+        const trigger = div.querySelector('.schedule-trigger');
+        if (trigger) {
+          trigger.addEventListener('click', () => openScheduleModal(j.id, primaryPlatform));
+        }
       });
+    }
+
+    function renderScheduleBoard() {
+      const board = document.getElementById('scheduleBoard');
+      const empty = document.getElementById('scheduleEmpty');
+      if (!board || !empty) return;
+      board.innerHTML = '';
+      if (!schedules.length) {
+        empty.style.display = 'block';
+        return;
+      }
+      empty.style.display = 'none';
+      const groups = {};
+      schedules.forEach((entry) => {
+        const platform = entry.platform || 'Unassigned';
+        if (!groups[platform]) {
+          groups[platform] = [];
+        }
+        groups[platform].push(entry);
+      });
+      const statusOrder = ['scheduled', 'posted', 'failed', 'canceled'];
+      Object.keys(groups)
+        .sort((a, b) => a.localeCompare(b))
+        .forEach((platform) => {
+          const entries = groups[platform];
+          const container = document.createElement('div');
+          container.className = 'schedule-platform';
+          const header = document.createElement('header');
+          const left = document.createElement('div');
+          const title = document.createElement('strong');
+          title.textContent = platform;
+          const meta = document.createElement('div');
+          meta.className = 'small';
+          meta.textContent = `${entries.length} total drops`;
+          left.appendChild(title);
+          left.appendChild(meta);
+          header.appendChild(left);
+          const right = document.createElement('div');
+          right.className = 'small';
+          const upcoming = entries
+            .filter((entry) => entry.status === 'scheduled')
+            .sort((a, b) => (a.scheduled_for_iso || '').localeCompare(b.scheduled_for_iso || ''))[0];
+          right.textContent = upcoming ? `Next: ${formatDisplayTime(upcoming.scheduled_for_iso)}` : 'No upcoming runs';
+          header.appendChild(right);
+          container.appendChild(header);
+          const statusWrap = document.createElement('div');
+          statusWrap.className = 'schedule-statuses';
+          statusOrder.forEach((status) => {
+            const subset = entries.filter((entry) => entry.status === status);
+            if (!subset.length) return;
+            const group = document.createElement('div');
+            group.className = 'schedule-status-group';
+            const groupTitle = document.createElement('div');
+            groupTitle.className = 'schedule-status-title';
+            groupTitle.textContent = `${scheduleStatusLabels[status] || status} · ${subset.length}`;
+            group.appendChild(groupTitle);
+            subset
+              .slice()
+              .sort((a, b) => (a.scheduled_for_iso || '').localeCompare(b.scheduled_for_iso || ''))
+              .forEach((entry) => {
+                const entryDiv = document.createElement('div');
+                entryDiv.className = 'schedule-entry';
+                const titleRow = document.createElement('div');
+                titleRow.className = 'inline';
+                const name = document.createElement('strong');
+                name.textContent = entry.job_title || `Job ${entry.job_id}`;
+                const badge = document.createElement('span');
+                badge.className = `status badge ${entry.status}`;
+                badge.textContent = scheduleStatusLabels[entry.status] || entry.status;
+                titleRow.appendChild(name);
+                titleRow.appendChild(badge);
+                entryDiv.appendChild(titleRow);
+                const timeLine = document.createElement('div');
+                timeLine.className = 'small';
+                timeLine.textContent = `Runs ${formatDisplayTime(entry.scheduled_for_iso)}`;
+                entryDiv.appendChild(timeLine);
+                const jobLineParts = [];
+                if (entry.job_profile_name) jobLineParts.push(entry.job_profile_name);
+                if (entry.job_content_type) jobLineParts.push(entry.job_content_type);
+                if (jobLineParts.length) {
+                  const jobLine = document.createElement('div');
+                  jobLine.className = 'small';
+                  jobLine.textContent = jobLineParts.join(' • ');
+                  entryDiv.appendChild(jobLine);
+                }
+                if (entry.result && entry.status === 'failed') {
+                  const resultLine = document.createElement('div');
+                  resultLine.className = 'small';
+                  resultLine.textContent = entry.result;
+                  entryDiv.appendChild(resultLine);
+                }
+                const actions = document.createElement('div');
+                actions.className = 'actions';
+                if (['scheduled', 'failed', 'canceled'].includes(entry.status)) {
+                  const reschedBtn = document.createElement('button');
+                  reschedBtn.type = 'button';
+                  reschedBtn.className = 'secondary';
+                  reschedBtn.textContent = 'Reschedule';
+                  reschedBtn.addEventListener('click', () => openScheduleModalForExisting(entry.id));
+                  actions.appendChild(reschedBtn);
+                }
+                if (entry.status === 'scheduled') {
+                  const cancelBtn = document.createElement('button');
+                  cancelBtn.type = 'button';
+                  cancelBtn.className = 'secondary';
+                  cancelBtn.textContent = 'Cancel';
+                  cancelBtn.addEventListener('click', () => cancelSchedule(entry.id));
+                  actions.appendChild(cancelBtn);
+                }
+                if (entry.status === 'failed') {
+                  const retryBtn = document.createElement('button');
+                  retryBtn.type = 'button';
+                  retryBtn.textContent = 'Retry';
+                  retryBtn.addEventListener('click', () => retrySchedule(entry.id));
+                  actions.appendChild(retryBtn);
+                  const cancelBtn = document.createElement('button');
+                  cancelBtn.type = 'button';
+                  cancelBtn.className = 'secondary';
+                  cancelBtn.textContent = 'Cancel';
+                  cancelBtn.addEventListener('click', () => cancelSchedule(entry.id));
+                  actions.appendChild(cancelBtn);
+                }
+                if (entry.status === 'canceled') {
+                  const reactivateBtn = document.createElement('button');
+                  reactivateBtn.type = 'button';
+                  reactivateBtn.textContent = 'Reactivate';
+                  reactivateBtn.addEventListener('click', () => retrySchedule(entry.id));
+                  actions.appendChild(reactivateBtn);
+                }
+                if (actions.children.length) {
+                  entryDiv.appendChild(actions);
+                }
+                group.appendChild(entryDiv);
+              });
+            statusWrap.appendChild(group);
+          });
+          container.appendChild(statusWrap);
+          board.appendChild(container);
+        });
     }
 
     function setStatus(msg) {
       document.getElementById('aiStatus').textContent = msg || '';
+    }
+
+    function openScheduleModal(jobId, defaultPlatform = '', scheduleId = null, scheduledIso = '') {
+      if (!scheduleModal || !scheduleBackdrop) return;
+      const jobField = document.getElementById('schedule_job_id');
+      const editField = document.getElementById('schedule_edit_id');
+      const platformField = document.getElementById('schedule_platform');
+      const timeField = document.getElementById('schedule_time');
+      const note = document.getElementById('schedule_form_note');
+      const title = document.getElementById('scheduleModalTitle');
+      jobField.value = jobId ? String(jobId) : '';
+      editField.value = scheduleId ? String(scheduleId) : '';
+      platformField.value = typeof defaultPlatform === 'string' ? defaultPlatform : '';
+      timeField.value = scheduledIso ? (scheduledIso.length > 16 ? scheduledIso.slice(0, 16) : scheduledIso) : '';
+      note.textContent = scheduleId ? 'Update the drop time or platform, then save.' : 'Choose when and where to publish this job.';
+      title.textContent = scheduleId ? 'Update schedule' : 'Schedule delivery';
+      scheduleBackdrop.classList.add('active');
+      scheduleModal.classList.add('active');
+      setTimeout(() => platformField.focus(), 50);
+    }
+
+    function openScheduleModalForExisting(scheduleId) {
+      const entry = schedules.find((item) => Number(item.id) === Number(scheduleId));
+      if (!entry) return;
+      openScheduleModal(entry.job_id, entry.platform, entry.id, entry.scheduled_for_iso);
+    }
+
+    function closeScheduleModal() {
+      if (!scheduleModal || !scheduleBackdrop) return;
+      scheduleModal.classList.remove('active');
+      scheduleBackdrop.classList.remove('active');
+      if (scheduleForm) {
+        scheduleForm.reset();
+      }
+      document.getElementById('schedule_form_note').textContent = '';
+      document.getElementById('schedule_edit_id').value = '';
+    }
+
+    async function submitScheduleForm(event) {
+      event.preventDefault();
+      const jobField = document.getElementById('schedule_job_id');
+      const editField = document.getElementById('schedule_edit_id');
+      const platformField = document.getElementById('schedule_platform');
+      const timeField = document.getElementById('schedule_time');
+      const note = document.getElementById('schedule_form_note');
+      const platform = platformField.value.trim();
+      const when = timeField.value;
+      const scheduleId = editField.value;
+      if (!platform || !when) {
+        note.textContent = 'Platform and time are required.';
+        return;
+      }
+      note.textContent = 'Saving...';
+      try {
+        if (scheduleId) {
+          await fetchJSON(`/ai/schedule/${scheduleId}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ platform, scheduled_for: when }),
+          });
+        } else {
+          const jobId = Number(jobField.value);
+          if (!jobId) {
+            note.textContent = 'Missing job reference.';
+            return;
+          }
+          await fetchJSON('/ai/schedule', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ job_id: jobId, platform, scheduled_for: when }),
+          });
+        }
+        closeScheduleModal();
+        refreshSchedules();
+      } catch (err) {
+        console.error('Schedule save failed', err);
+        note.textContent = 'Error: ' + err.message;
+      }
+    }
+
+    async function cancelSchedule(scheduleId) {
+      if (!confirm('Cancel this scheduled delivery?')) return;
+      try {
+        await fetchJSON(`/ai/schedule/${scheduleId}/cancel`, { method: 'POST' });
+        refreshSchedules();
+      } catch (err) {
+        alert('Cancel failed: ' + err.message);
+      }
+    }
+
+    async function retrySchedule(scheduleId) {
+      try {
+        await fetchJSON(`/ai/schedule/${scheduleId}/retry`, { method: 'POST' });
+        refreshSchedules();
+      } catch (err) {
+        alert('Retry failed: ' + err.message);
+      }
     }
 
     function copyOutput() {
@@ -327,11 +785,32 @@
       navigator.clipboard.writeText(text).then(() => setStatus('Copied to clipboard'), (err) => setStatus('Copy failed: ' + err));
     }
 
+    if (scheduleBackdrop) {
+      scheduleBackdrop.addEventListener('click', closeScheduleModal);
+    }
+    if (scheduleModal) {
+      scheduleModal.addEventListener('click', (event) => {
+        if (event.target === scheduleModal) {
+          closeScheduleModal();
+        }
+      });
+    }
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        closeScheduleModal();
+      }
+    });
+
     document.getElementById('profileForm').addEventListener('submit', saveProfile);
     document.getElementById('generationForm').addEventListener('submit', runGeneration);
+    if (scheduleForm) {
+      scheduleForm.addEventListener('submit', submitScheduleForm);
+    }
 
+    loadPublishers();
     loadProfiles();
     refreshJobs();
+    refreshSchedules();
   </script>
 </body>
 </html>
