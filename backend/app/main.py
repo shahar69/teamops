@@ -193,7 +193,7 @@ def init_db():
             ))
 
 def now_iso() -> str:
-    return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def parse_schedule_time(val: str) -> datetime:
     # Expect 'YYYY-MM-DDTHH:MM' or with seconds; store naive UTC for sqlite
@@ -414,7 +414,7 @@ async def api_profiles_create(body: Dict[str, Any]):
     voice = body.get("voice")
     target_platform = body.get("target_platform")
     guidelines = body.get("guidelines")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         conn.execute(text(
             """
@@ -437,21 +437,21 @@ async def api_profiles_delete(pid: int):
 # ---------- Content Generation ----------
 def _build_prompt_from_profile(conn, profile_id: Optional[int], body: Dict[str, Any]) -> Tuple[str, str]:
     system = "You are a content generation assistant."
-    user = body.get("brief") or ""
+    # user will be constructed later
     if profile_id:
         row = conn.execute(text("SELECT * FROM ai_content_profiles WHERE id=:id"), {"id": profile_id}).mappings().first()
         if row:
             parts = [
-                f"Tone: {row.get('tone') or ''}",
-                f"Voice: {row.get('voice') or ''}",
-                f"Primary platforms: {row.get('target_platform') or ''}",
-                f"Guidelines: {row.get('guidelines') or ''}",
+                "Tone: {}".format(row.get('tone') or ''),
+                "Voice: {}".format(row.get('voice') or ''),
+                "Primary platforms: {}".format(row.get('target_platform') or ''),
+                "Guidelines: {}".format(row.get('guidelines') or ''),
             ]
             system = "You write on-brand content.\n" + "\n".join(parts)
     title = body.get("title") or ""
     keywords = body.get("keywords") or ""
     extra = body.get("extra") or ""
-    user = f"Title: {title}\nKeywords: {keywords}\nBrief: {body.get('brief') or ''}\nExtra: {extra}"
+    user = "Title: {}\nKeywords: {}\nBrief: {}\nExtra: {}".format(title, keywords, body.get('brief') or '', extra)
     return system, user
 
 def _fallback_generate(body: Dict[str, Any]) -> str:
@@ -545,7 +545,7 @@ async def api_content(body: Dict[str, Any]):
     profile_id = body.get("profile_id")
     content_type = body.get("content_type") or "custom"
     title = body.get("title") or "Untitled"
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         # Build prompt
         system, user = _build_prompt_from_profile(conn, int(profile_id) if profile_id else None, body)
@@ -589,20 +589,12 @@ async def api_content(body: Dict[str, Any]):
 
 @app.get("/ai/jobs")
 async def api_jobs_list():
-    is_sqlite = str(engine.url).lower().startswith("sqlite")
     with engine.begin() as conn:
-        if is_sqlite:
-            sql = (
-                "SELECT j.*, p.name AS profile_name, p.target_platform AS profile_platform "
-                "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id "
-                "ORDER BY COALESCE(j.updated_at, j.created_at) DESC, j.id DESC LIMIT 50"
-            )
-        else:
-            sql = (
-                "SELECT j.*, p.name AS profile_name, p.target_platform AS profile_platform "
-                "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id "
-                "ORDER BY COALESCE(j.updated_at, j.created_at) DESC, j.id DESC LIMIT 50"
-            )
+        sql = (
+            "SELECT j.*, p.name AS profile_name, p.target_platform AS profile_platform "
+            "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id "
+            "ORDER BY COALESCE(j.updated_at, j.created_at) DESC, j.id DESC LIMIT 50"
+        )
         rows = conn.execute(text(sql)).mappings().all()
     # add simple ISO times
     out = []
@@ -647,7 +639,7 @@ async def api_schedule_create(body: Dict[str, Any]):
     when = parse_schedule_time(body.get("scheduled_for"))
     if not job_id or not platform:
         raise HTTPException(400, detail="job_id and platform are required")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         conn.execute(text(
             """
@@ -661,7 +653,7 @@ async def api_schedule_create(body: Dict[str, Any]):
 async def api_schedule_update(sid: int, body: Dict[str, Any]):
     platform = (body.get("platform") or "").strip()
     when = parse_schedule_time(body.get("scheduled_for"))
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE ai_content_schedules SET platform=:platform, scheduled_for=:when, updated_at=:now WHERE id=:id"
