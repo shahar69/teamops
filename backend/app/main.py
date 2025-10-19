@@ -42,6 +42,8 @@ templates = Environment(
 
 app = FastAPI()
 _scheduler: Optional[Any] = None
+_voices_cache_data: Optional[Dict[str, Any]] = None
+_voices_cache_ts: float = 0.0
 
 def init_db():
     """Create/upgrade minimal schema required by the UI for both SQLite and Postgres."""
@@ -798,8 +800,20 @@ async def seed_backgrounds():
 
 
 @app.get("/ai/voices")
-async def list_voices():
-    import shutil, subprocess
+async def list_voices(refresh: bool = False):
+    """List available local TTS voices.
+
+    Caches the result for ~60s to avoid repeated shell or library calls. Pass refresh=true to bypass cache.
+    """
+    import shutil, subprocess, time
+    global _voices_cache_data, _voices_cache_ts
+
+    now = time.time()
+    if not refresh and _voices_cache_data and (now - _voices_cache_ts) < 60.0:
+        return _voices_cache_data
+
+    result: Dict[str, Any] = {"voices": []}
+    # Try pyttsx3 first
     try:
         import pyttsx3
         try:
@@ -814,7 +828,7 @@ async def list_voices():
                     "age": getattr(v, 'age', None),
                 })
             if out:
-                return {"voices": out}
+                result = {"voices": out}
         except Exception:
             pass
     except Exception:
@@ -822,29 +836,36 @@ async def list_voices():
         pass
 
     # Fallback: attempt to list voices from espeak-ng or espeak
-    speak = shutil.which('espeak-ng') or shutil.which('espeak')
-    if speak:
-        try:
-            # espeak-ng --voices prints table; parse names in column 4 (Variant) or 3 (Language) if missing
-            out = subprocess.check_output([speak, '--voices'], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
-            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-            results = []
-            # Skip header lines
-            for ln in lines:
-                if ln.lower().startswith('pty') or ln.lower().startswith('enabled') or ln.lower().startswith('idx'):
-                    continue
-                parts = [p for p in ln.split(' ') if p]
-                # Typical columns: Pty Language Age/Gender VoiceName File ...
-                if len(parts) >= 4:
-                    lang = parts[1]
-                    name = parts[3]
-                    results.append({"id": name, "name": name, "languages": [lang]})
-            return {"voices": results}
-        except Exception:
-            pass
+    if not result.get("voices"):
+        speak = shutil.which('espeak-ng') or shutil.which('espeak')
+        if speak:
+            try:
+                # espeak-ng --voices prints table; parse names in column 4 (Variant) or 3 (Language) if missing
+                out = subprocess.check_output([speak, '--voices'], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
+                lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+                results = []
+                # Skip header lines
+                for ln in lines:
+                    if ln.lower().startswith('pty') or ln.lower().startswith('enabled') or ln.lower().startswith('idx'):
+                        continue
+                    parts = [p for p in ln.split(' ') if p]
+                    # Typical columns: Pty Language Age/Gender VoiceName File ...
+                    if len(parts) >= 4:
+                        lang = parts[1]
+                        name = parts[3]
+                        results.append({"id": name, "name": name, "languages": [lang]})
+                result = {"voices": results}
+            except Exception:
+                pass
 
     # Last resort: no voices available; return empty list rather than 500 to keep UI usable
-    return {"voices": [], "note": "No local TTS voice list available (install espeak-ng or ensure pyttsx3 voices)."}
+    if not result.get("voices"):
+        result = {"voices": [], "note": "No local TTS voice list available (install espeak-ng, then click Refresh voices)."}
+
+    # Update cache
+    _voices_cache_data = result
+    _voices_cache_ts = now
+    return result
 
 
 @app.post("/ai/voices/preview")

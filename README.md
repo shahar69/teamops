@@ -70,3 +70,34 @@ them without leaving the automation workspace.
 
 For follow-up deployments, rerun the script or follow the manual commands at
 the end of the deployment runbook to update containers safely.
+
+## Voices & Offline TTS
+
+The Money Bots video tool supports fully offline text-to-speech (TTS) using espeak-ng.
+
+- Host install (Debian/Ubuntu):
+
+   ```bash
+   sudo apt-get update
+   sudo apt-get install -y espeak-ng ffmpeg fonts-dejavu-core
+   espeak-ng --version
+   espeak-ng --voices | head -n 10
+   ```
+
+- Docker image: The backend Dockerfile already installs `espeak-ng` and `ffmpeg`.
+   Rebuild the image if you updated the Dockerfile:
+
+   ```bash
+   docker compose build backend
+   docker compose up -d backend
+   ```
+
+- Verifying in the app:
+   - Open the UI at `/ui/ai-content`
+   - Open “Edit & re-render” for any job
+   - Click “Refresh voices” — you should see a count like “120 voices”
+   - Optionally use “Preview voice” to hear a short sample
+
+If voices don’t appear, ensure `espeak-ng` is installed in the environment where the backend runs
+and that you clicked “Refresh voices”. The API endpoint `/ai/voices` should return JSON with a
+`voices` list; it is cached for ~60 seconds, pass `?refresh=true` to bypass the cache.

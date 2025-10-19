@@ -198,6 +198,7 @@
           <label class="inline" style="gap:6px"><input type="checkbox" id="editor_subtitles" checked> Burn subtitles</label>
           <label class="inline" style="gap:6px">Voice <select id="editor_voice"><option value="">(default)</option></select></label>
           <button type="button" class="secondary" id="btn_refresh_voices">Refresh voices</button>
+          <span class="small muted" id="voices_count" style="min-width:100px"></span>
           <label class="inline" style="gap:6px">Rate <input id="editor_rate" type="number" min="120" max="220" step="5" value="160" style="width:90px"></label>
         </div>
         <div class="flex">
@@ -329,9 +330,10 @@
       }
     }
 
-    async function loadVoices() {
+    async function loadVoices(opts = {}) {
       try {
-        const data = await fetchJSON('/ai/voices');
+        const qs = opts.refresh ? '?refresh=true' : '';
+        const data = await fetchJSON('/ai/voices' + qs);
         voices = data.voices || [];
       } catch (e) {
         voices = [];
@@ -342,8 +344,12 @@
       sel.innerHTML = '<option value="">(default)</option>' + voices.map((v) => `<option value="${esc(v.name || v.id || '')}">${esc(v.name || v.id || '')}</option>`).join('');
       if (cur) sel.value = cur;
       const note = document.getElementById('editor_note');
+      const vc = document.getElementById('voices_count');
+      if (vc) {
+        vc.textContent = voices.length ? `${voices.length} voices` : '0 voices';
+      }
       if ((!voices || !voices.length) && note) {
-        note.textContent = 'No local TTS voices detected. Install espeak-ng for offline voices.';
+        note.textContent = 'No local TTS voices detected. Install espeak-ng for offline voices, then click Refresh voices.';
       }
     }
 
@@ -733,7 +739,7 @@
       const btnSeed = document.getElementById('btn_seed_bgs');
       if (btnSeed) btnSeed.onclick = () => seedBackgroundsInUi(document.getElementById('editor_note'));
       const btnVoices = document.getElementById('btn_refresh_voices');
-      if (btnVoices) btnVoices.onclick = () => loadVoices();
+  if (btnVoices) btnVoices.onclick = () => loadVoices({ refresh: true });
       const btnPrev = document.getElementById('btn_preview_voice');
       if (btnPrev) btnPrev.onclick = () => previewVoice();
     }
