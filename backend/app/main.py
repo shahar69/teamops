@@ -348,6 +348,11 @@ except Exception:
 async def ui_ai_content(request: Request):
     return render_html("ai_content.html")
 
+@app.get("/ui/video-studio", response_class=HTMLResponse)
+async def ui_video_studio(request: Request):
+    """New dedicated video creation studio interface."""
+    return render_html("video_studio.html")
+
 @app.get("/ui/{page}", response_class=HTMLResponse)
 async def ui_page(page: str):
     name = page

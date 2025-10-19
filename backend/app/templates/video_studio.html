@@ -1,0 +1,1070 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Video Studio · Money Bots</title>
+  <style>
+    :root {
+      --bg-primary: #0b0f14;
+      --bg-secondary: #111923;
+      --bg-tertiary: #0f172a;
+      --border: #1e2633;
+      --text-primary: #e8edf5;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --success: #4ade80;
+      --warning: #facc15;
+      --error: #f87171;
+      --shadow: rgba(8, 15, 25, 0.6);
+    }
+    
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.6;
+    }
+    
+    .studio-container {
+      display: grid;
+      grid-template-columns: 320px 1fr 380px;
+      height: 100vh;
+      gap: 0;
+    }
+    
+    .sidebar {
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+    }
+    
+    .sidebar-header {
+      padding: 20px;
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--bg-secondary);
+      z-index: 10;
+    }
+    
+    .sidebar-header h1 {
+      font-size: 1.25rem;
+      margin-bottom: 4px;
+    }
+    
+    .sidebar-header .subtitle {
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+    
+    .sidebar-content {
+      padding: 20px;
+      flex: 1;
+    }
+    
+    .project-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    
+    .project-card {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    
+    .project-card:hover {
+      border-color: var(--accent);
+      transform: translateX(4px);
+    }
+    
+    .project-card.active {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.1);
+    }
+    
+    .project-card-title {
+      font-weight: 600;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .project-card-meta {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+    }
+    
+    .project-status {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    
+    .project-status.draft { background: var(--text-muted); color: white; }
+    .project-status.rendering { background: var(--warning); color: black; }
+    .project-status.ready { background: var(--success); color: black; }
+    .project-status.error { background: var(--error); color: white; }
+    
+    .main-workspace {
+      background: var(--bg-primary);
+      overflow-y: auto;
+      padding: 32px;
+    }
+    
+    .workspace-header {
+      margin-bottom: 32px;
+    }
+    
+    .workspace-title {
+      font-size: 2rem;
+      margin-bottom: 8px;
+    }
+    
+    .workspace-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    
+    .canvas-container {
+      position: relative;
+      margin-bottom: 32px;
+      background: #000;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px var(--shadow);
+    }
+    
+    .canvas-aspect {
+      position: relative;
+      width: 100%;
+      max-width: 540px;
+      margin: 0 auto;
+      aspect-ratio: 9/16;
+    }
+    
+    .canvas-preview {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .canvas-preview video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    
+    .canvas-placeholder {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      color: var(--text-muted);
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    }
+    
+    .canvas-placeholder-icon {
+      font-size: 4rem;
+      opacity: 0.3;
+    }
+    
+    .canvas-placeholder-text {
+      font-size: 1.1rem;
+      text-align: center;
+      padding: 0 40px;
+    }
+    
+    .timeline-container {
+      background: var(--bg-secondary);
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 24px;
+    }
+    
+    .timeline-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    
+    .timeline-track {
+      background: var(--bg-tertiary);
+      border-radius: 8px;
+      height: 60px;
+      position: relative;
+      display: flex;
+      align-items: center;
+      padding: 8px;
+      gap: 8px;
+    }
+    
+    .timeline-segment {
+      background: var(--accent);
+      border-radius: 6px;
+      height: 100%;
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.75rem;
+      color: white;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    
+    .timeline-segment:hover {
+      opacity: 0.8;
+    }
+    
+    .properties-panel {
+      background: var(--bg-secondary);
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+      padding: 24px;
+    }
+    
+    .panel-section {
+      margin-bottom: 28px;
+    }
+    
+    .panel-section-title {
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      margin-bottom: 16px;
+    }
+    
+    .form-group {
+      margin-bottom: 20px;
+    }
+    
+    .form-label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: var(--text-secondary);
+    }
+    
+    .form-input,
+    .form-textarea,
+    .form-select {
+      width: 100%;
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 0.95rem;
+      transition: all 0.2s;
+      font-family: inherit;
+    }
+    
+    .form-input:focus,
+    .form-textarea:focus,
+    .form-select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+    }
+    
+    .form-textarea {
+      min-height: 120px;
+      resize: vertical;
+    }
+    
+    .btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 10px;
+      padding: 12px 20px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      justify-content: center;
+    }
+    
+    .btn:hover {
+      background: var(--accent-hover);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3);
+    }
+    
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+    
+    .btn-secondary {
+      background: var(--bg-tertiary);
+      color: var(--text-primary);
+    }
+    
+    .btn-secondary:hover {
+      background: #1e293b;
+      box-shadow: none;
+    }
+    
+    .btn-success {
+      background: var(--success);
+      color: black;
+    }
+    
+    .btn-success:hover {
+      background: #22c55e;
+    }
+    
+    .btn-sm {
+      padding: 8px 14px;
+      font-size: 0.85rem;
+    }
+    
+    .btn-block {
+      width: 100%;
+    }
+    
+    .voice-preview-container {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    
+    .voice-preview-container .form-select {
+      flex: 1;
+    }
+    
+    .audio-player {
+      width: 100%;
+      margin-top: 8px;
+      border-radius: 8px;
+    }
+    
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    
+    .checkbox-group input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+    }
+    
+    .checkbox-group label {
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    
+    .slider-group {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    .slider-group input[type="range"] {
+      flex: 1;
+    }
+    
+    .slider-value {
+      min-width: 50px;
+      text-align: right;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    
+    .background-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 12px;
+    }
+    
+    .background-item {
+      background: var(--bg-tertiary);
+      border: 2px solid transparent;
+      border-radius: 10px;
+      padding: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: center;
+    }
+    
+    .background-item:hover {
+      border-color: var(--accent);
+    }
+    
+    .background-item.active {
+      border-color: var(--accent);
+      background: rgba(37, 99, 235, 0.1);
+    }
+    
+    .background-thumbnail {
+      width: 100%;
+      aspect-ratio: 9/16;
+      background: #000;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      font-size: 2rem;
+    }
+    
+    .background-name {
+      font-size: 0.75rem;
+      color: var(--text-secondary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    
+    .status-message {
+      padding: 12px 16px;
+      border-radius: 10px;
+      margin-bottom: 16px;
+      font-size: 0.9rem;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    
+    .status-message.info {
+      background: rgba(37, 99, 235, 0.1);
+      border: 1px solid var(--accent);
+      color: var(--accent);
+    }
+    
+    .status-message.success {
+      background: rgba(74, 222, 128, 0.1);
+      border: 1px solid var(--success);
+      color: var(--success);
+    }
+    
+    .status-message.error {
+      background: rgba(248, 113, 113, 0.1);
+      border: 1px solid var(--error);
+      color: var(--error);
+    }
+    
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--text-muted);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .empty-state {
+      text-align: center;
+      padding: 60px 40px;
+      color: var(--text-secondary);
+    }
+    
+    .empty-state-icon {
+      font-size: 4rem;
+      margin-bottom: 16px;
+      opacity: 0.3;
+    }
+    
+    .empty-state-title {
+      font-size: 1.3rem;
+      margin-bottom: 8px;
+      color: var(--text-primary);
+    }
+    
+    .empty-state-text {
+      font-size: 0.95rem;
+      margin-bottom: 24px;
+    }
+    
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: var(--bg-tertiary);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 999px;
+      transition: width 0.3s ease;
+    }
+    
+    @media (max-width: 1400px) {
+      .studio-container {
+        grid-template-columns: 280px 1fr 340px;
+      }
+    }
+    
+    @media (max-width: 1024px) {
+      .studio-container {
+        grid-template-columns: 1fr;
+      }
+      
+      .sidebar,
+      .properties-panel {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="studio-container">
+    <!-- Left Sidebar: Project List -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1>🎬 Video Studio</h1>
+        <p class="subtitle">Create stunning short-form videos</p>
+      </div>
+      <div class="sidebar-content">
+        <button class="btn btn-success btn-block" id="newProjectBtn">
+          <span>➕</span> New Project
+        </button>
+        <div style="margin: 24px 0; height: 1px; background: var(--border);"></div>
+        <div id="projectList" class="project-list">
+          <div class="empty-state">
+            <div class="empty-state-icon">📁</div>
+            <p class="empty-state-title">No Projects Yet</p>
+            <p class="empty-state-text">Create your first video project to get started</p>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Workspace: Canvas & Timeline -->
+    <main class="main-workspace">
+      <div class="workspace-header">
+        <h2 class="workspace-title" id="projectTitle">Select or Create a Project</h2>
+        <p style="color: var(--text-secondary);" id="projectSubtitle">Choose a project from the sidebar or create a new one</p>
+        <div class="workspace-actions" id="workspaceActions" style="display: none;">
+          <button class="btn" id="renderBtn">
+            <span>🎥</span> Render Video
+          </button>
+          <button class="btn btn-secondary" id="previewBtn">
+            <span>▶️</span> Quick Preview
+          </button>
+          <button class="btn btn-secondary" id="saveBtn">
+            <span>💾</span> Save
+          </button>
+        </div>
+      </div>
+
+      <div id="statusArea"></div>
+
+      <div class="canvas-container">
+        <div class="canvas-aspect">
+          <div class="canvas-preview" id="canvasPreview">
+            <div class="canvas-placeholder">
+              <div class="canvas-placeholder-icon">🎞️</div>
+              <p class="canvas-placeholder-text">Your video preview will appear here</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-container">
+        <div class="timeline-header">
+          <h3 style="font-size: 1rem;">Timeline</h3>
+          <span style="font-size: 0.85rem; color: var(--text-secondary);" id="timelineDuration">0:00</span>
+        </div>
+        <div class="timeline-track" id="timelineTrack">
+          <div class="timeline-segment" style="background: rgba(37, 99, 235, 0.3);">
+            <span>No content</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right Panel: Properties & Controls -->
+    <aside class="properties-panel">
+      <div class="panel-section">
+        <h3 class="panel-section-title">🎯 Project Settings</h3>
+        <div class="form-group">
+          <label class="form-label" for="titleInput">Video Title</label>
+          <input type="text" id="titleInput" class="form-input" placeholder="Enter video title...">
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="scriptInput">Script / Narration</label>
+          <textarea id="scriptInput" class="form-textarea" placeholder="Write your video script here..."></textarea>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3 class="panel-section-title">🎨 Background</h3>
+        <div class="form-group">
+          <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+            <button class="btn btn-secondary btn-sm" id="refreshBgBtn">Refresh</button>
+            <button class="btn btn-secondary btn-sm" id="seedBgBtn">Generate Samples</button>
+          </div>
+          <div id="backgroundGrid" class="background-grid">
+            <div class="background-item active" data-bg="">
+              <div class="background-thumbnail">🎨</div>
+              <div class="background-name">Static Title</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3 class="panel-section-title">🎙️ Voice & Audio</h3>
+        <div class="form-group">
+          <label class="form-label" for="voiceSelect">Voice</label>
+          <div class="voice-preview-container">
+            <select id="voiceSelect" class="form-select">
+              <option value="">(loading...)</option>
+            </select>
+            <button class="btn btn-secondary btn-sm" id="refreshVoicesBtn">🔄</button>
+          </div>
+          <button class="btn btn-secondary btn-sm btn-block" id="previewVoiceBtn" style="margin-top: 8px;">Preview Voice</button>
+          <audio id="voicePreviewAudio" class="audio-player" controls style="display: none;"></audio>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Speech Rate</label>
+          <div class="slider-group">
+            <input type="range" id="rateSlider" min="120" max="220" step="5" value="160">
+            <span class="slider-value" id="rateValue">160</span>
+          </div>
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="musicCheck">
+          <label for="musicCheck">Add background music</label>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Music Volume</label>
+          <div class="slider-group">
+            <input type="range" id="musicVolumeSlider" min="0" max="1" step="0.05" value="0.15">
+            <span class="slider-value" id="musicVolumeValue">0.15</span>
+          </div>
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="duckingCheck" checked>
+          <label for="duckingCheck">Duck music under voice</label>
+        </div>
+      </div>
+
+      <div class="panel-section">
+        <h3 class="panel-section-title">📝 Subtitles & Overlays</h3>
+        <div class="checkbox-group">
+          <input type="checkbox" id="subtitlesCheck" checked>
+          <label for="subtitlesCheck">Burn subtitles</label>
+        </div>
+        <div class="checkbox-group">
+          <input type="checkbox" id="titleOverlayCheck" checked>
+          <label for="titleOverlayCheck">Show title overlay</label>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Minimum Duration (seconds)</label>
+          <input type="number" id="minDurationInput" class="form-input" value="0" min="0" step="5">
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    // State management
+    let currentProject = null;
+    let projects = [];
+    let voices = [];
+    let backgrounds = [];
+    let isRendering = false;
+
+    // DOM elements
+    const projectList = document.getElementById('projectList');
+    const newProjectBtn = document.getElementById('newProjectBtn');
+    const projectTitle = document.getElementById('projectTitle');
+    const projectSubtitle = document.getElementById('projectSubtitle');
+    const workspaceActions = document.getElementById('workspaceActions');
+    const statusArea = document.getElementById('statusArea');
+    const canvasPreview = document.getElementById('canvasPreview');
+    const titleInput = document.getElementById('titleInput');
+    const scriptInput = document.getElementById('scriptInput');
+    const voiceSelect = document.getElementById('voiceSelect');
+    const rateSlider = document.getElementById('rateSlider');
+    const rateValue = document.getElementById('rateValue');
+    const musicCheck = document.getElementById('musicCheck');
+    const musicVolumeSlider = document.getElementById('musicVolumeSlider');
+    const musicVolumeValue = document.getElementById('musicVolumeValue');
+    const duckingCheck = document.getElementById('duckingCheck');
+    const subtitlesCheck = document.getElementById('subtitlesCheck');
+    const titleOverlayCheck = document.getElementById('titleOverlayCheck');
+    const minDurationInput = document.getElementById('minDurationInput');
+    const backgroundGrid = document.getElementById('backgroundGrid');
+    const renderBtn = document.getElementById('renderBtn');
+    const previewBtn = document.getElementById('previewBtn');
+    const saveBtn = document.getElementById('saveBtn');
+    const refreshVoicesBtn = document.getElementById('refreshVoicesBtn');
+    const previewVoiceBtn = document.getElementById('previewVoiceBtn');
+    const voicePreviewAudio = document.getElementById('voicePreviewAudio');
+    const refreshBgBtn = document.getElementById('refreshBgBtn');
+    const seedBgBtn = document.getElementById('seedBgBtn');
+    const timelineDuration = document.getElementById('timelineDuration');
+
+    // Utility functions
+    function showStatus(message, type = 'info') {
+      const statusDiv = document.createElement('div');
+      statusDiv.className = `status-message ${type}`;
+      if (type === 'info' && message.includes('...')) {
+        statusDiv.innerHTML = `<span class="spinner"></span><span>${message}</span>`;
+      } else {
+        statusDiv.textContent = message;
+      }
+      statusArea.innerHTML = '';
+      statusArea.appendChild(statusDiv);
+      if (type === 'success' || type === 'error') {
+        setTimeout(() => statusDiv.remove(), 5000);
+      }
+    }
+
+    function clearStatus() {
+      statusArea.innerHTML = '';
+    }
+
+    async function fetchJSON(url, options = {}) {
+      const res = await fetch(url, options);
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `${res.status} ${res.statusText}`);
+      }
+      return res.json();
+    }
+
+    // Load voices
+    async function loadVoices(refresh = false) {
+      try {
+        const qs = refresh ? '?refresh=true' : '';
+        const data = await fetchJSON('/ai/voices' + qs);
+        voices = data.voices || [];
+        renderVoiceSelect();
+        if (refresh) {
+          showStatus(`Loaded ${voices.length} voices`, 'success');
+        }
+      } catch (err) {
+        showStatus(`Failed to load voices: ${err.message}`, 'error');
+      }
+    }
+
+    function renderVoiceSelect() {
+      const current = voiceSelect.value;
+      voiceSelect.innerHTML = '<option value="">(default)</option>' + 
+        voices.map(v => `<option value="${v.name || v.id}">${v.name || v.id}</option>`).join('');
+      if (current) voiceSelect.value = current;
+    }
+
+    // Load backgrounds
+    async function loadBackgrounds() {
+      try {
+        const data = await fetchJSON('/ai/video/backgrounds');
+        backgrounds = data.backgrounds || [];
+        renderBackgroundGrid();
+      } catch (err) {
+        showStatus(`Failed to load backgrounds: ${err.message}`, 'error');
+      }
+    }
+
+    function renderBackgroundGrid() {
+      const staticItem = `
+        <div class="background-item ${currentProject?.background ? '' : 'active'}" data-bg="">
+          <div class="background-thumbnail">🎨</div>
+          <div class="background-name">Static Title</div>
+        </div>
+      `;
+      const bgItems = backgrounds.map(bg => `
+        <div class="background-item ${currentProject?.background === bg ? 'active' : ''}" data-bg="${bg}">
+          <div class="background-thumbnail">🎞️</div>
+          <div class="background-name">${bg}</div>
+        </div>
+      `).join('');
+      backgroundGrid.innerHTML = staticItem + bgItems;
+
+      // Add click handlers
+      backgroundGrid.querySelectorAll('.background-item').forEach(item => {
+        item.addEventListener('click', () => {
+          backgroundGrid.querySelectorAll('.background-item').forEach(i => i.classList.remove('active'));
+          item.classList.add('active');
+          if (currentProject) {
+            currentProject.background = item.dataset.bg;
+          }
+        });
+      });
+    }
+
+    async function seedBackgrounds() {
+      try {
+        showStatus('Generating sample backgrounds...', 'info');
+        await fetchJSON('/ai/video/backgrounds/seed', { method: 'POST' });
+        await loadBackgrounds();
+        showStatus('Sample backgrounds generated', 'success');
+      } catch (err) {
+        showStatus(`Failed to seed backgrounds: ${err.message}`, 'error');
+      }
+    }
+
+    // Voice preview
+    async function previewVoice() {
+      try {
+        showStatus('Generating voice preview...', 'info');
+        const voice = voiceSelect.value;
+        const rate = parseInt(rateSlider.value);
+        const text = scriptInput.value.trim().substring(0, 100) || 'This is a sample voice.';
+        
+        const data = await fetchJSON('/ai/voices/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, voice, rate })
+        });
+        
+        const url = data?.preview?.url;
+        if (url) {
+          voicePreviewAudio.src = url;
+          voicePreviewAudio.style.display = 'block';
+          await voicePreviewAudio.play();
+          showStatus('Voice preview ready', 'success');
+        } else {
+          showStatus('No preview URL returned', 'error');
+        }
+      } catch (err) {
+        showStatus(`Preview failed: ${err.message}`, 'error');
+      }
+    }
+
+    // Project management
+    function createNewProject() {
+      const project = {
+        id: Date.now(),
+        title: 'Untitled Video',
+        script: '',
+        background: '',
+        voice: '',
+        rate: 160,
+        music: false,
+        musicVolume: 0.15,
+        ducking: true,
+        subtitles: true,
+        titleOverlay: true,
+        minDuration: 0,
+        status: 'draft',
+        videoUrl: null,
+        createdAt: new Date().toISOString()
+      };
+      projects.push(project);
+      selectProject(project);
+      renderProjectList();
+      showStatus('New project created', 'success');
+    }
+
+    function selectProject(project) {
+      currentProject = project;
+      projectTitle.textContent = project.title;
+      projectSubtitle.textContent = `Status: ${project.status} • Created ${new Date(project.createdAt).toLocaleDateString()}`;
+      workspaceActions.style.display = 'flex';
+      
+      // Load project settings into controls
+      titleInput.value = project.title;
+      scriptInput.value = project.script;
+      voiceSelect.value = project.voice || '';
+      rateSlider.value = project.rate;
+      rateValue.textContent = project.rate;
+      musicCheck.checked = project.music;
+      musicVolumeSlider.value = project.musicVolume;
+      musicVolumeValue.textContent = project.musicVolume;
+      duckingCheck.checked = project.ducking;
+      subtitlesCheck.checked = project.subtitles;
+      titleOverlayCheck.checked = project.titleOverlay;
+      minDurationInput.value = project.minDuration;
+      
+      // Update background selection
+      renderBackgroundGrid();
+      
+      // Update canvas preview
+      if (project.videoUrl) {
+        canvasPreview.innerHTML = `<video src="${project.videoUrl}" controls playsinline style="width: 100%; height: 100%; object-fit: cover;"></video>`;
+      } else {
+        canvasPreview.innerHTML = `
+          <div class="canvas-placeholder">
+            <div class="canvas-placeholder-icon">🎞️</div>
+            <p class="canvas-placeholder-text">Your video preview will appear here</p>
+          </div>
+        `;
+      }
+      
+      renderProjectList();
+      clearStatus();
+    }
+
+    function saveProject() {
+      if (!currentProject) return;
+      
+      currentProject.title = titleInput.value || 'Untitled Video';
+      currentProject.script = scriptInput.value;
+      currentProject.voice = voiceSelect.value;
+      currentProject.rate = parseInt(rateSlider.value);
+      currentProject.music = musicCheck.checked;
+      currentProject.musicVolume = parseFloat(musicVolumeSlider.value);
+      currentProject.ducking = duckingCheck.checked;
+      currentProject.subtitles = subtitlesCheck.checked;
+      currentProject.titleOverlay = titleOverlayCheck.checked;
+      currentProject.minDuration = parseInt(minDurationInput.value);
+      
+      // Update display
+      projectTitle.textContent = currentProject.title;
+      renderProjectList();
+      showStatus('Project saved', 'success');
+    }
+
+    function renderProjectList() {
+      if (!projects.length) {
+        projectList.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">📁</div>
+            <p class="empty-state-title">No Projects Yet</p>
+            <p class="empty-state-text">Create your first video project to get started</p>
+          </div>
+        `;
+        return;
+      }
+      
+      projectList.innerHTML = projects.map(p => `
+        <div class="project-card ${currentProject?.id === p.id ? 'active' : ''}" data-id="${p.id}">
+          <div class="project-card-title">
+            <span>${p.title}</span>
+            <span class="project-status ${p.status}">${p.status}</span>
+          </div>
+          <div class="project-card-meta">
+            ${new Date(p.createdAt).toLocaleDateString()}
+          </div>
+        </div>
+      `).join('');
+      
+      // Add click handlers
+      projectList.querySelectorAll('.project-card').forEach(card => {
+        card.addEventListener('click', () => {
+          const project = projects.find(p => p.id === parseInt(card.dataset.id));
+          if (project) selectProject(project);
+        });
+      });
+    }
+
+    // Render video
+    async function renderVideo() {
+      if (!currentProject || isRendering) return;
+      
+      if (!currentProject.title || !currentProject.script) {
+        showStatus('Title and script are required', 'error');
+        return;
+      }
+      
+      isRendering = true;
+      currentProject.status = 'rendering';
+      renderProjectList();
+      renderBtn.disabled = true;
+      
+      try {
+        showStatus('Rendering video...', 'info');
+        
+        const payload = {
+          title: currentProject.title,
+          script: currentProject.script,
+          background: currentProject.background || null,
+          tts_voice: currentProject.voice || null,
+          tts_rate: currentProject.rate,
+          subtitles: currentProject.subtitles,
+          draw_title: currentProject.titleOverlay,
+          music: currentProject.music,
+          music_volume: currentProject.musicVolume,
+          ducking: currentProject.ducking,
+          min_duration: currentProject.minDuration || null
+        };
+        
+        const data = await fetchJSON('/ai/video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        
+        const url = data?.video?.url;
+        if (url) {
+          currentProject.videoUrl = url;
+          currentProject.status = 'ready';
+          canvasPreview.innerHTML = `<video src="${url}" controls playsinline style="width: 100%; height: 100%; object-fit: cover;"></video>`;
+          showStatus('Video rendered successfully!', 'success');
+        } else {
+          throw new Error('No video URL returned');
+        }
+      } catch (err) {
+        currentProject.status = 'error';
+        showStatus(`Render failed: ${err.message}`, 'error');
+      } finally {
+        isRendering = false;
+        renderBtn.disabled = false;
+        renderProjectList();
+      }
+    }
+
+    // Event listeners
+    newProjectBtn.addEventListener('click', createNewProject);
+    saveBtn.addEventListener('click', saveProject);
+    renderBtn.addEventListener('click', renderVideo);
+    refreshVoicesBtn.addEventListener('click', () => loadVoices(true));
+    previewVoiceBtn.addEventListener('click', previewVoice);
+    refreshBgBtn.addEventListener('click', loadBackgrounds);
+    seedBgBtn.addEventListener('click', seedBackgrounds);
+    
+    rateSlider.addEventListener('input', () => {
+      rateValue.textContent = rateSlider.value;
+    });
+    
+    musicVolumeSlider.addEventListener('input', () => {
+      musicVolumeValue.textContent = musicVolumeSlider.value;
+    });
+    
+    // Auto-save on input changes
+    titleInput.addEventListener('change', saveProject);
+    scriptInput.addEventListener('change', saveProject);
+    
+    // Initialize
+    loadVoices();
+    loadBackgrounds();
+  </script>
+</body>
+</html>
