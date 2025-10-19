@@ -118,8 +118,8 @@ def get_publisher(name: str):
         except Exception:
             return None
     try:
-        PubCls = _find_publisher_class(module, slug)
-        return PubCls(get_env())
+        publisher_class = _find_publisher_class(module, slug)
+        return publisher_class(get_env())
     except PublisherConfigError:
         return None
 

@@ -12,7 +12,6 @@ import hashlib
 import httpx
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
 import json
 
 # Minimal imports for scheduler and publishers
@@ -44,6 +43,9 @@ app = FastAPI()
 _scheduler: Optional[Any] = None
 _voices_cache_data: Optional[Dict[str, Any]] = None
 _voices_cache_ts: float = 0.0
+
+# Reused SQL column DDL fragments (avoid literal duplication)
+SQL_UPDATED_AT_COL = "updated_at DATETIME"
 
 def init_db():
     """Create/upgrade minimal schema required by the UI for both SQLite and Postgres."""
@@ -79,7 +81,7 @@ def init_db():
                 ("voice", "voice TEXT"),
                 ("target_platform", "target_platform TEXT"),
                 ("guidelines", "guidelines TEXT"),
-                ("updated_at", "updated_at DATETIME"),
+                ("updated_at", SQL_UPDATED_AT_COL),
             ])
 
             # Jobs
@@ -109,7 +111,7 @@ def init_db():
                 ("data_sources", "data_sources TEXT"),
                 ("extra", "extra TEXT"),
                 ("generated_content", "generated_content TEXT"),
-                ("updated_at", "updated_at DATETIME"),
+                ("updated_at", SQL_UPDATED_AT_COL),
             ])
 
             # Schedules
@@ -137,7 +139,7 @@ def init_db():
                 ("attempts", "attempts INTEGER DEFAULT 0"),
                 ("last_attempted_at", "last_attempted_at DATETIME"),
                 ("delivery_meta", "delivery_meta TEXT DEFAULT '{}'"),
-                ("updated_at", "updated_at DATETIME"),
+                ("updated_at", SQL_UPDATED_AT_COL),
             ])
         else:
             # Postgres schema
@@ -232,12 +234,12 @@ def verify_session(signed: str) -> bool:
     expected = hmac.new(BACKEND_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(expected, sig)
 
-async def ai_call(messages: List[Dict[str, str]], temperature: float = 0.7, timeout: float = None) -> Dict[str, Any]:
+async def ai_call(messages: List[Dict[str, str]], temperature: float = 0.7) -> Dict[str, Any]:
     """Call an OpenAI-compatible chat completions endpoint.
 
     Local mode: when AI_LOCAL=true, no API key is required and the default base is http://127.0.0.1:11434/v1 (Ollama-compatible).
     """
-    timeout = timeout or AI_TIMEOUT
+    timeout = AI_TIMEOUT
     url = f"{AI_API_BASE.rstrip('/')}/chat/completions"
     payload = {"model": AI_MODEL, "messages": messages, "temperature": temperature}
     headers = {"Content-Type": "application/json"}
@@ -247,10 +249,11 @@ async def ai_call(messages: List[Dict[str, str]], temperature: float = 0.7, time
         # no API key and not in local mode — surface clear error to enable fallback
         raise HTTPException(status_code=500, detail="AI_API_KEY not configured (set AI_LOCAL=true to use a local server)")
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(url, json=payload, headers=headers)
-            r.raise_for_status()
-            return r.json()
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(url, json=payload, headers=headers)
+                r.raise_for_status()
+                return r.json()
     except httpx.HTTPError as e:
         # map HTTPX errors to a 502 for clarity
         raise HTTPException(status_code=502, detail=f"AI provider error: {str(e)}")
@@ -468,19 +471,19 @@ def _fallback_generate(body: Dict[str, Any]) -> str:
             f"Keywords: {keywords}",
             "",
             "Post 1:",
-            f"- Hook: {title} — you won't believe this {tag} twist.",
-            f"- Body: Quick hit: what happened, why it matters, and the hidden detail everyone misses.",
-            f"- CTA: Follow for more {tag} drops like this.",
+            "- Hook: " + title + " — you won't believe this " + tag + " twist.",
+            "- Body: Quick hit: what happened, why it matters, and the hidden detail everyone misses.",
+            "- CTA: Follow for more " + tag + " drops like this.",
             "",
             "Post 2:",
-            f"- Hook: The moment that changed everything in {title}.",
-            f"- Body: Set the scene, deliver the surprise, then land the takeaway.",
-            f"- CTA: Share with a friend who needs this.",
+            "- Hook: The moment that changed everything in " + title + ".",
+            "- Body: Set the scene, deliver the surprise, then land the takeaway.",
+            "- CTA: Share with a friend who needs this.",
             "",
             "Post 3:",
-            f"- Hook: If you missed {title}, here's the 15s recap.",
-            f"- Body: Three beats: setup · twist · payoff. Simple and tight.",
-            f"- CTA: Save this so you don't forget.",
+            "- Hook: If you missed " + title + ", here's the 15s recap.",
+            "- Body: Three beats: setup · twist · payoff. Simple and tight.",
+            "- CTA: Save this so you don't forget.",
         ]
     elif ctype == 'reddit-story':
         kw = [k.strip() for k in str(keywords).split(',') if k.strip()]
@@ -490,16 +493,16 @@ def _fallback_generate(body: Dict[str, Any]) -> str:
             f"Keywords: {keywords}",
             "",
             "Intro:",
-            f"Last night I was deep in {tag} mode when something felt off. Not the usual kind of off, either.",
+            "Last night I was deep in " + tag + " mode when something felt off. Not the usual kind of off, either.",
             "",
             "The twist:",
-            f"Halfway in, a tiny detail changed the entire vibe. I paused, rewound, and realized what I missed.",
+            "Halfway in, a tiny detail changed the entire vibe. I paused, rewound, and realized what I missed.",
             "",
             "Build-up:",
             "I started connecting dots — the noise, the timing, the way the room felt colder than it should.",
             "",
             "Climax:",
-            f"Suddenly, it clicked. The whole {title} moment wasn’t random — it was building to this.",
+            "Suddenly, it clicked. The whole " + title + " moment wasn’t random — it was building to this.",
             "",
             "Aftermath:",
             "I saved the clip, turned the lights back on, and laughed at how hard I got baited.",
@@ -662,14 +665,14 @@ async def api_schedule_update(sid: int, body: Dict[str, Any]):
 
 @app.post("/ai/schedule/{sid}/cancel")
 async def api_schedule_cancel(sid: int):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         conn.execute(text("UPDATE ai_content_schedules SET status='canceled', updated_at=:now WHERE id=:id"), {"now": now, "id": sid})
     return {"ok": True}
 
 @app.post("/ai/schedule/{sid}/retry")
 async def api_schedule_retry(sid: int):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         conn.execute(text(
             "UPDATE ai_content_schedules SET status='scheduled', result=NULL, updated_at=:now WHERE id=:id"
@@ -805,24 +808,29 @@ async def list_voices(refresh: bool = False):
         return _voices_cache_data
 
     result: Dict[str, Any] = {"voices": []}
-    # Try pyttsx3 first
+    # Try pyttsx3 first (offload work to thread to avoid blocking the event loop)
     try:
         import pyttsx3
-        try:
-            engine = pyttsx3.init()
-            out = []
-            for v in engine.getProperty("voices") or []:
-                out.append({
-                    "id": getattr(v, 'id', None),
-                    "name": getattr(v, 'name', None),
-                    "languages": [str(x) for x in (getattr(v, 'languages', []) or [])],
-                    "gender": getattr(v, 'gender', None),
-                    "age": getattr(v, 'age', None),
-                })
-            if out:
-                result = {"voices": out}
-        except Exception:
-            pass
+
+        def _enumerate_pyttsx3_voices() -> List[Dict[str, Any]]:
+            try:
+                engine = pyttsx3.init()
+                out_local: List[Dict[str, Any]] = []
+                for v in engine.getProperty("voices") or []:
+                    out_local.append({
+                        "id": getattr(v, 'id', None),
+                        "name": getattr(v, 'name', None),
+                        "languages": [str(x) for x in (getattr(v, 'languages', []) or [])],
+                        "gender": getattr(v, 'gender', None),
+                        "age": getattr(v, 'age', None),
+                    })
+                return out_local
+            except Exception:
+                return []
+
+        out = await asyncio.to_thread(_enumerate_pyttsx3_voices)
+        if out:
+            result = {"voices": out}
     except Exception:
         # pyttsx3 import failed; continue to CLI fallback
         pass
@@ -832,16 +840,21 @@ async def list_voices(refresh: bool = False):
         speak = shutil.which('espeak-ng') or shutil.which('espeak')
         if speak:
             try:
-                # espeak-ng --voices prints table; parse names in column 4 (Variant) or 3 (Language) if missing
-                out = subprocess.check_output([speak, '--voices'], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
+                # Use asyncio subprocess to avoid blocking the event loop
+                proc = await asyncio.create_subprocess_exec(
+                    speak, '--voices',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                stdout, _ = await proc.communicate()
+                out = stdout.decode('utf-8', errors='ignore') if stdout else ''
                 lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
                 results = []
-                # Skip header lines
                 for ln in lines:
-                    if ln.lower().startswith('pty') or ln.lower().startswith('enabled') or ln.lower().startswith('idx'):
+                    low = ln.lower()
+                    if low.startswith('pty') or low.startswith('enabled') or low.startswith('idx'):
                         continue
                     parts = [p for p in ln.split(' ') if p]
-                    # Typical columns: Pty Language Age/Gender VoiceName File ...
                     if len(parts) >= 4:
                         lang = parts[1]
                         name = parts[3]
@@ -882,7 +895,7 @@ def _db_scalar(conn, sql: str) -> int:
 
 
 def seed_profiles_and_jobs():
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         profiles_count = _db_scalar(conn, "SELECT COUNT(*) FROM ai_content_profiles")
         if profiles_count == 0:
