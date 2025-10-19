@@ -18,9 +18,9 @@ def test_video_studio_ui_loads(tmp_path):
         assert r.status_code == 200
         assert "Video Studio" in r.text
         assert "🎬 Video Studio" in r.text
-        assert "PROJECT SETTINGS" in r.text
-        assert "BACKGROUND" in r.text
-        assert "VOICE & AUDIO" in r.text
+        assert "Project Settings" in r.text
+        assert "Background" in r.text
+        assert "Voice & Audio" in r.text
 
 
 def test_video_studio_api_endpoints(tmp_path):
