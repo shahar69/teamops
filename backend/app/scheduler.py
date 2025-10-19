@@ -6,10 +6,13 @@ from typing import Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+import os
+
+from backend.app.publishers import get_publisher
 
 
 class AIScheduleDispatcher:
-    """Simple polling dispatcher for scheduled AI content deliveries."""
+    """Reliable polling dispatcher for scheduled AI content deliveries."""
 
     def __init__(
         self,
@@ -26,8 +29,8 @@ class AIScheduleDispatcher:
     async def start(self) -> None:
         if self._task and not self._task.done():
             return
-        loop = asyncio.get_running_loop()
         self._stopping = False
+        loop = asyncio.get_running_loop()
         self._task = loop.create_task(self._run())
 
     async def stop(self) -> None:
@@ -40,26 +43,23 @@ class AIScheduleDispatcher:
     async def _run(self) -> None:
         while not self._stopping:
             try:
-                processed = await asyncio.get_running_loop().run_in_executor(
-                    None, self._process_due
-                )
-            except Exception as exc:  # pragma: no cover - defensive logging
-                print(f"[AI-SCHEDULE] tick error: {exc}", file=sys.stderr)
-                processed = 0
-            await asyncio.sleep(self.interval_seconds if processed == 0 else 0.1)
+                await self._process_due()
+            except Exception as e:  # pragma: no cover - defensive logging
+                print("Scheduler error:", e, file=sys.stderr)
+            await asyncio.sleep(self.interval_seconds)
 
-    def _process_due(self) -> int:
-        processed = 0
+    async def _process_due(self) -> None:
         now = datetime.utcnow().replace(tzinfo=timezone.utc)
         now_iso = now.isoformat().replace("+00:00", "Z")
         with self.engine.begin() as conn:
+            # select due schedules
             due_rows = conn.execute(
                 text(
                     """
                     SELECT id, job_id, platform
-                    FROM ai_content_schedule
-                    WHERE status='pending' AND publish_at <= NOW()
-                    ORDER BY publish_at ASC
+                    FROM ai_content_schedules
+                    WHERE status='scheduled' AND scheduled_for <= NOW()
+                    ORDER BY scheduled_for ASC
                     FOR UPDATE SKIP LOCKED
                     LIMIT :limit
                     """
@@ -67,7 +67,6 @@ class AIScheduleDispatcher:
                 {"limit": self.batch_size},
             ).fetchall()
             for row in due_rows:
-                processed += 1
                 try:
                     payload = {
                         "last_enqueued_at": now_iso,
@@ -76,15 +75,56 @@ class AIScheduleDispatcher:
                     conn.execute(
                         text(
                             """
-                            UPDATE ai_content_schedule
+                            UPDATE ai_content_schedules
                             SET status='queued',
                                 delivery_meta = COALESCE(delivery_meta, '{}'::jsonb) || :meta::jsonb,
+                                last_attempted_at = NOW(),
+                                attempts = COALESCE(attempts,0) + 1,
                                 updated_at=NOW()
                             WHERE id=:id
                             """
                         ),
                         {"id": row.id, "meta": json.dumps(payload)},
                     )
+                    # Optionally attempt immediate publish if enabled
+                    try_publish = os.environ.get("ENABLE_PUBLISH", "false").lower() in ("1","true","yes")
+                    if try_publish:
+                        # fetch job and schedule full rows
+                        sched = conn.execute(text(
+                            "SELECT s.*, j.title, j.generated_content, j.content_type FROM ai_content_schedules s JOIN ai_content_jobs j ON j.id=s.job_id WHERE s.id=:id"
+                        ), {"id": row.id}).fetchone()
+                        if sched:
+                            job = {
+                                "id": sched.job_id,
+                                "title": sched.title,
+                                "generated_content": sched.generated_content,
+                                "content_type": sched.content_type,
+                            }
+                            schedule = dict(sched._mapping)
+                            try:
+                                pub = get_publisher(sched.platform)
+                                res = pub.publish(job, schedule)
+                                conn.execute(text(
+                                    """
+                                    UPDATE ai_content_schedules
+                                    SET status = 'posted',
+                                        result = :result,
+                                        delivery_meta = COALESCE(delivery_meta, '{}'::jsonb) || :meta::jsonb,
+                                        updated_at = NOW()
+                                    WHERE id=:id
+                                    """
+                                ), {"id": row.id, "result": str(res), "meta": json.dumps({"published_at": now_iso, "publish_result": res})})
+                            except Exception as pp_err:
+                                conn.execute(text(
+                                    """
+                                    UPDATE ai_content_schedules
+                                    SET status = 'failed',
+                                        result = :result,
+                                        delivery_meta = COALESCE(delivery_meta, '{}'::jsonb) || :meta::jsonb,
+                                        updated_at = NOW()
+                                    WHERE id=:id
+                                    """
+                                ), {"id": row.id, "result": str(pp_err), "meta": json.dumps({"failed_at": now_iso, "error": str(pp_err)})})
                 except Exception as exc:  # pragma: no cover - defensive logging
                     print(
                         f"[AI-SCHEDULE] failed queueing schedule {row.id}: {exc}",
@@ -93,9 +133,10 @@ class AIScheduleDispatcher:
                     conn.execute(
                         text(
                             """
-                            UPDATE ai_content_schedule
+                            UPDATE ai_content_schedules
                             SET status='error',
                                 delivery_meta = COALESCE(delivery_meta, '{}'::jsonb) || :meta::jsonb,
+                                last_attempted_at = NOW(),
                                 updated_at=NOW()
                             WHERE id=:id
                             """
@@ -110,4 +151,3 @@ class AIScheduleDispatcher:
                             ),
                         },
                     )
-        return processed

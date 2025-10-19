@@ -37,6 +37,21 @@ these steps to bootstrap the complete stack:
 Detailed instructions, optional customisations, and a post-deployment checklist
 are documented in [`docs/deploy_vm_192.168.1.22.md`](docs/deploy_vm_192.168.1.22.md).
 
+## Quick dev run:
+
+1. Build and run services:
+   ./scripts/smoke_test.sh
+
+2. Health endpoint:
+   http://localhost:8000/health
+
+3. UI (if template present):
+   http://localhost:8000/ui/ai-content
+
+Notes:
+- Create .env.production at repo root with any required publisher/Ai keys for local testing if desired.
+- The backend exposes a dry-run publisher endpoint at POST /publish/{publisher}/dry_run
+
 ## Money Bots operations
 
 Money Bots profiles and automation capabilities are covered in

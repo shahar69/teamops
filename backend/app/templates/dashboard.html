@@ -1,0 +1,366 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>TeamOps Dashboard</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:18px}
+    header{display:flex;align-items:center;justify-content:space-between}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px}
+    .panel{border:1px solid #ddd;padding:12px;border-radius:6px;background:#fff}
+    pre{white-space:pre-wrap}
+    .small{font-size:0.9rem;color:#666}
+    button{padding:6px 10px;border-radius:4px}
+
+    /* modal styles (was missing) */
+    .modal{display:none;position:fixed;inset:0;align-items:center;justify-content:center;background:rgba(0,0,0,0.35);z-index:50}
+    .modal.active{display:flex}
+    .modal-content{background:#fff;padding:16px;border-radius:8px;max-width:720px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.12)}
+    .modal-content input{width:100%;margin-top:6px;padding:6px;border:1px solid #ddd;border-radius:4px}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>TeamOps — Dashboard</h1>
+    <div>
+      <span id="userEmail">{{ email }}</span>
+      <a href="/ui/logout">Logout</a>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="panel" id="profilesPanel">
+      <h3>AI Profiles</h3>
+      <div id="profilesList">Loading...</div>
+    </div>
+
+    <div class="panel" id="publishersPanel">
+      <h3>Publishers</h3>
+      <div id="publishersList">Loading...</div>
+    </div>
+
+    <div class="panel" id="channelsPanel">
+      <h3>Channels</h3>
+      <div id="channelsList">Loading...</div>
+      <form id="channelForm" onsubmit="return submitChannelForm(event);" style="margin-top:8px">
+        <input id="chId" type="hidden" />
+        <input id="chName" placeholder="Channel name" required />
+        <input id="chPlatform" placeholder="platform (tiktok,youtube_shorts)" required />
+        <input id="chMaxPerDay" placeholder="max per day (10)" />
+        <input id="chMinInterval" placeholder="min interval seconds (3600)" />
+        <input id="chJitter" placeholder="jitter seconds (600)" />
+        <label style="margin-top:8px"><input id="chLive" type="checkbox" /> Live enabled</label>
+        <div style="margin-top:8px"><button id="chSubmit">Create</button> <button type="button" class="secondary" onclick="resetChannelForm()">Reset</button></div>
+      </form>
+      <div id="channelMsg" class="small"></div>
+    </div>
+
+    <!-- Channel edit modal (optional) -->
+    <div id="channelModal" class="modal">
+      <div class="modal-content">
+        <h3 id="channelModalTitle">Edit Channel</h3>
+        <form id="channelEditForm" onsubmit="return submitChannelForm(event)">
+          <input id="edit_chId" type="hidden" />
+          <label for="edit_chName">Name</label>
+          <input id="edit_chName" />
+          <label for="edit_chPlatform">Platform</label>
+          <input id="edit_chPlatform" />
+          <label for="edit_chMaxPerDay">Max per day</label>
+          <input id="edit_chMaxPerDay" type="number" />
+          <label for="edit_chMinInterval">Min interval seconds</label>
+          <input id="edit_chMinInterval" type="number" />
+          <label for="edit_chJitter">Jitter seconds</label>
+          <input id="edit_chJitter" type="number" />
+          <label><input id="edit_chLive" type="checkbox" /> Live enabled</label>
+          <div class="flex" style="margin-top:12px">
+            <button type="submit">Save</button>
+            <button type="button" class="secondary" onclick="closeChannelModal()">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+ 
+    <div class="panel" id="approvalsPanel">
+      <h3>Pending Approvals</h3>
+      <div id="approvalsList">Loading...</div>
+    </div>
+
+    <div class="panel" id="jobsPanel">
+      <h3>Recent Jobs</h3>
+      <div id="jobsList">Loading...</div>
+    </div>
+    <div class="panel" id="mediaPanel">
+      <h3>Media</h3>
+      <div id="mediaList">Loading...</div>
+    </div>
+    <div class="panel" id="schedulePanel">
+      <h3>Create Schedule</h3>
+      <div id="scheduleMsg" class="small"></div>
+      <form id="scheduleForm" onsubmit="return createSchedule();" style="margin-top:8px">
+        <select id="jobSelect"></select>
+        <select id="channelSelect"></select>
+        <input id="schedTime" placeholder="YYYY-MM-DDTHH:MMZ (ISO)" />
+        <button>Create schedule</button>
+      </form>
+    </div>
+    <div class="panel" id="schedulesPanel">
+      <h3>Upcoming Schedules</h3>
+      <div id="schedulesList">Loading...</div>
+    </div>
+  </div>
+
+<script>
+-async function fetchJson(path){
+-  const r=await fetch(path,{credentials:'same-origin'});
+-  if(!r.ok) throw new Error(await r.text());
+-  return r.json();
+-}
++// robust fetchJson: accepts one or more paths and tries them in order
++async function fetchJson(...paths){
++  // allow passing an array as the first arg
++  const list = (paths.length===1 && Array.isArray(paths[0])) ? paths[0] : paths;
++  for(let i=0;i<list.length;i++){
++    const path = list[i];
++    try{
++      const r = await fetch(path, { credentials: 'same-origin' });
++      if(!r.ok){
++        // try next if 404 (endpoint might be at plural/singular variant)
++        if(r.status===404 && i < list.length-1) continue;
++        throw new Error(await r.text());
++      }
++      const ct = (r.headers.get('content-type')||'').toLowerCase();
++      if(ct.includes('application/json')) return r.json();
++      // try to parse text as JSON if content-type missing
++      const text = await r.text();
++      try{ return JSON.parse(text) }catch(e){ throw new Error('Unexpected response (not JSON): '+text.slice(0,200)) }
++    }catch(err){
++      if(i===list.length-1) throw err; // last attempt -> bubble up
++      // otherwise continue to next fallback
++    }
++  }
++}
++
++// generic POST helper that tries multiple endpoints (useful for singular/plural mismatches)
++async function postJson(paths, opts){
++  const list = Array.isArray(paths) ? paths : [paths];
++  for(let i=0;i<list.length;i++){
++    const path = list[i];
++    try{
++      const r = await fetch(path, opts);
++      if(!r.ok){
++        if(r.status===404 && i < list.length-1) continue;
++        throw new Error(await r.text());
++      }
++      const ct = (r.headers.get('content-type')||'').toLowerCase();
++      if(ct.includes('application/json')) return r.json();
++      return { ok: true };
++    }catch(err){
++      if(i===list.length-1) throw err;
++    }
++  }
++}
+ 
+-async function render(){
++async function render(){
+   try{
+     const p = await fetchJson('/ai/profiles');
+     document.getElementById('profilesList').innerHTML = p.profiles.map(x=>`<div><strong>${x.name}</strong> — ${x.tone||'—'}<div class='small'>${x.guidelines||''}</div></div>`).join('');
+   }catch(e){document.getElementById('profilesList').innerText = 'Error loading profiles: '+e}
+ 
+   try{
+     const pubs = await fetchJson('/ai/publishers');
+     document.getElementById('publishersList').innerHTML = (pubs.publishers || []).map(x=>`<div><strong>${x.display_name}</strong><div class='small'>${x.description||''}</div></div>`).join('');
+   }catch(e){document.getElementById('publishersList').innerText = 'Error loading publishers: '+e}
+ 
+   try{
+     const jobs = await fetchJson('/ai/jobs?limit=10');
+     document.getElementById('jobsList').innerHTML = (jobs.jobs||[]).map(j=>`<div><strong>${j.title}</strong> <div class='small'>${j.status} — ${j.updated_at}</div><pre>${(j.generated_content||'').slice(0,240)}</pre><div style="margin-top:6px"><button onclick="generateVideo(${j.id})">Generate Video</button></div></div>`).join('');
+   }catch(e){document.getElementById('jobsList').innerText = 'Error loading jobs: '+e}
+ 
+   try{
+-    const s = await fetchJson('/ai/schedule');
++    // try both singular and plural schedule endpoints
++    const s = await fetchJson('/ai/schedule','/ai/schedules');
+     document.getElementById('schedulesList').innerHTML = (s.schedules||[]).slice(0,10).map(x=>`<div><strong>${x.job_title}</strong> — ${x.platform} <div class='small'>${x.scheduled_for} — ${x.status}</div></div>`).join('');
+   }catch(e){document.getElementById('schedulesList').innerText = 'Error loading schedules: '+e}
+ }
+ 
+ render();
+ 
+ async function loadChannels(){
+   try{
+     const r = await fetchJson('/api/channels');
+     const list = (r.channels||[]);
+     document.getElementById('channelsList').innerHTML = list.map(c=>`<div style="margin-bottom:8px"><strong>${c.name}</strong> <div class='small'>${c.platform} — live:${c.live_enabled} max/day:${c.max_per_day}</div><div style="margin-top:6px"><button onclick="editChannel(${c.id})">Edit</button> <button onclick="deleteChannel(${c.id})" class="secondary">Delete</button></div></div>`).join('') || 'No channels yet';
+   }catch(e){document.getElementById('channelsList').innerText = 'Error loading channels: '+e}
+ }
+
+ async function createChannel(){
+   const name = document.getElementById('chName').value.trim();
+   const platform = document.getElementById('chPlatform').value.trim();
+   if(!name||!platform) return false;
+   try{
+     const r = await fetch('/api/channels',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'}, body: JSON.stringify({name,platform})});
+     if(!r.ok){ const t = await r.text(); document.getElementById('channelMsg').innerText = 'Create failed: '+t; return false }
+     document.getElementById('channelMsg').innerText = 'Channel created';
+     document.getElementById('chName').value=''; document.getElementById('chPlatform').value='';
+     await loadChannels();
+   }catch(e){document.getElementById('channelMsg').innerText = 'Create error: '+e}
+   return false;
+ }
+
+ loadChannels();
+
+ function resetChannelForm(){
+   document.getElementById('chId').value='';
+   document.getElementById('chName').value='';
+   document.getElementById('chPlatform').value='';
+   document.getElementById('chMaxPerDay').value='';
+   document.getElementById('chMinInterval').value='';
+   document.getElementById('chJitter').value='';
+   document.getElementById('chLive').checked=false;
+   document.getElementById('chSubmit').textContent='Create';
+ }
+
+ function editChannel(id){
+   // populate form for edit
+   fetchJson(`/api/channels`).then(r=>{
+     const ch = (r.channels||[]).find(x=>Number(x.id)===Number(id));
+     if(!ch) return alert('channel not found');
+     document.getElementById('chId').value = ch.id;
+     document.getElementById('chName').value = ch.name;
+     document.getElementById('chPlatform').value = ch.platform;
+     document.getElementById('chMaxPerDay').value = ch.max_per_day;
+     document.getElementById('chMinInterval').value = ch.min_interval_seconds;
+     document.getElementById('chJitter').value = ch.jitter_seconds;
+     document.getElementById('chLive').checked = ch.live_enabled;
+     document.getElementById('chSubmit').textContent='Update';
+     // show modal as well
+     document.getElementById('channelModal').classList.add('active');
+   }).catch(e=>alert('load channels failed: '+e))
+ }
+
+ function closeChannelModal(){
+   document.getElementById('channelModal').classList.remove('active');
+ }
+
+ async function submitChannelForm(e){
+   e.preventDefault();
+   const id = document.getElementById('chId').value || null;
+   const payload = {
+     name: document.getElementById('chName').value.trim(),
+     platform: document.getElementById('chPlatform').value.trim(),
+     live_enabled: document.getElementById('chLive').checked,
+     max_per_day: document.getElementById('chMaxPerDay').value ? Number(document.getElementById('chMaxPerDay').value) : undefined,
+     min_interval_seconds: document.getElementById('chMinInterval').value ? Number(document.getElementById('chMinInterval').value) : undefined,
+     jitter_seconds: document.getElementById('chJitter').value ? Number(document.getElementById('chJitter').value) : undefined,
+   };
+   try{
+     if(!id){
+       const r = await fetch('/api/channels',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body: JSON.stringify(payload)});
+       if(!r.ok) throw new Error(await r.text());
+       document.getElementById('channelMsg').innerText='Created';
+     } else {
+       const r = await fetch(`/api/channels/${id}`,{method:'PUT',credentials:'same-origin',headers:{'Content-Type':'application/json'},body: JSON.stringify(payload)});
+       if(!r.ok) throw new Error(await r.text());
+       document.getElementById('channelMsg').innerText='Updated';
+       closeChannelModal();
+     }
+     resetChannelForm();
+     await loadChannels();
+     await loadJobsAndChannelsForSchedule();
+   }catch(e){document.getElementById('channelMsg').innerText='Error: '+e}
+   return false;
+ }
+
+ async function deleteChannel(id){
+   if(!confirm('Delete channel?')) return;
+   try{
+     const r = await fetch(`/api/channels/${id}`,{method:'DELETE',credentials:'same-origin'});
+     if(!r.ok) throw new Error(await r.text());
+     await loadChannels();
+     await loadJobsAndChannelsForSchedule();
+   }catch(e){alert('Delete failed: '+e)}
+ }
+
+ async function loadJobsAndChannelsForSchedule(){
+   try{
+     const jobs = await fetchJson('/ai/jobs?limit=50');
+     const js = jobs.jobs || [];
+     const sel = document.getElementById('jobSelect'); sel.innerHTML = js.map(j=>`<option value='${j.id}'>${j.title} (${j.status})</option>`).join('');
+   }catch(e){ console.warn('jobs load failed',e) }
+   try{
+     const ch = await fetchJson('/api/channels');
+     const cs = ch.channels || [];
+     const selc = document.getElementById('channelSelect'); selc.innerHTML = `<option value=''>(none)</option>` + cs.map(c=>`<option value='${c.id}'>${c.name} — ${c.platform}</option>`).join('');
+   }catch(e){ console.warn('channels load failed',e) }
+ }
+
+ async function createSchedule(){
+   const job_id = document.getElementById('jobSelect').value;
+   const channel_id = document.getElementById('channelSelect').value || null;
+   const scheduled_for = document.getElementById('schedTime').value.trim();
+   if(!job_id || !scheduled_for){ document.getElementById('scheduleMsg').innerText = 'job and time required'; return false }
+   try{
+-    const r = await fetch('/ai/schedule',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body: JSON.stringify({job_id, channel_id, scheduled_for})});
+-    if(!r.ok){ document.getElementById('scheduleMsg').innerText = 'create failed: '+await r.text(); return false }
++    // try both possible schedule endpoints
++    await postJson(['/ai/schedule','/ai/schedules'],{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body: JSON.stringify({job_id, channel_id, scheduled_for})});
+     document.getElementById('scheduleMsg').innerText = 'scheduled';
+     return false;
+   }catch(e){ document.getElementById('scheduleMsg').innerText = 'error: '+e }
+   return false;
+ }
+
+ async function loadApprovals(){
+   try{
+-    const r = await fetchJson('/ai/schedule');
++    const r = await fetchJson('/ai/schedule','/ai/schedules');
+     const items = (r.schedules||[]).filter(s=>s.requires_approval && s.status==='pending_approval');
+     const wrap = document.getElementById('approvalsList');
+     wrap.innerHTML = items.map(i=>`<div><strong>${i.job_title||i.job_id}</strong> · ${i.channel_name||i.platform} <div class='small'>${i.scheduled_for} </div><div><button onclick="approve(${i.id})">Approve</button></div></div>`).join('') || 'No pending approvals';
+   }catch(e){document.getElementById('approvalsList').innerText = 'Error loading approvals: '+e}
+ }
+
+ async function approve(id){
+   try{
+-    const r = await fetch(`/ai/schedule/${id}/approve`,{method:'POST',credentials:'same-origin'});
+-    if(!r.ok){ alert('Approve failed: '+await r.text()); return }
++    // try both singular and plural base paths
++    await postJson([`/ai/schedule/${id}/approve`,`/ai/schedules/${id}/approve`],{method:'POST',credentials:'same-origin'});
+     alert('Approved');
+     await loadApprovals();
+   }catch(e){alert('Approve error: '+e)}
+ }
+
+ loadApprovals();
+
+ async function loadMedia(){
+   try{
+     const r = await fetchJson('/api/media');
+     const items = r.media || [];
+     document.getElementById('mediaList').innerHTML = items.map(m=>`<div style="margin-bottom:10px"><a href="/media/${m.filename}" target="_blank"><strong>${m.filename}</strong></a> <div class='small'>job:${m.job_id} ${m.created_at}</div></div>`).join('') || 'No media yet';
+   }catch(e){document.getElementById('mediaList').innerText = 'Error loading media: '+e}
+ }
+
+ async function generateVideo(jobId){
+   if(!confirm('Generate a short video for this job?')) return;
+   try{
+     const r = await fetch('/api/media/generate',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_id:jobId})});
+     if(!r.ok) throw new Error(await r.text());
+     alert('Media generated');
+     await loadMedia();
+   }catch(e){alert('Generate failed: '+e)}
+ }
+
+ loadMedia();
+
+ // small UX: close modal on overlay click
+ document.addEventListener('click', (ev)=>{
+   const modal = document.getElementById('channelModal');
+   if(!modal) return;
+   if(modal.classList.contains('active') && ev.target === modal) closeChannelModal();
+ });
+</script>
+</body>
+</html>

@@ -29,8 +29,9 @@ def metadata() -> Dict[str, Any]:
 def _load_credentials() -> Dict[str, str]:
     creds: Dict[str, str] = {}
     missing = []
+    env = get_env()
     for key in REQUIRED_ENV:
-        value = get_env(key)
+        value = env.get(key)
         if value:
             creds[key] = value
         else:
@@ -73,3 +74,23 @@ def publish(job: Dict[str, Any], schedule: Dict[str, Any]) -> Dict[str, Any]:
             "username": creds.get("PUBLISHER_REDDIT_USERNAME", ""),
         },
     }
+
+
+class RedditPublisher:
+    REQUIRED_ENV = REQUIRED_ENV
+
+    def __init__(self, env: Dict[str, str]):
+        self.env = env
+
+    def health_check(self) -> Dict[str, Any]:
+        missing = [k for k in REQUIRED_ENV if not self.env.get(k)]
+        return {"success": not missing, "message": ("Missing: " + ", ".join(missing)) if missing else "ok"}
+
+    def prepare_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "title": job.get("title", "Untitled"),
+            "text": (job.get("generated_content") or job.get("text") or "").strip(),
+        }
+
+    def publish(self, job: Dict[str, Any], schedule: Dict[str, Any] = None) -> Dict[str, Any]:
+        return {"status": "dry_run", "payload": self.prepare_payload(job)}

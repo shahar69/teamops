@@ -23,6 +23,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-teamops-db-pass-STRONG}
     volumes:
       - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
     networks: [ teamops ]
 
   backend:
@@ -109,3 +111,4 @@ services:
     volumes:
       - nextcloud_data:/var/www/html
     networks: [ teamops ]
+

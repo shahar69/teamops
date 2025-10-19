@@ -132,6 +132,7 @@
             <button type="button" class="secondary" onclick="copyOutput()">Copy output</button>
             <span id="aiStatus" class="muted"></span>
           </div>
+          <div class="small muted" id="aiModeInfo" style="margin-top:6px"></div>
         </form>
         <pre id="gen_output" style="display:none"></pre>
       </section>
@@ -177,12 +178,63 @@
       </form>
     </div>
   </div>
+  <div id="editorBackdrop" class="modal-backdrop"></div>
+  <div id="editorModal" class="modal">
+    <div class="modal-content">
+      <h3>Edit script and re-render</h3>
+      <form id="videoEditorForm">
+        <input type="hidden" id="editor_job_id">
+        <label for="editor_title">Title</label>
+        <input id="editor_title" placeholder="Title">
+        <label for="editor_script">Script</label>
+        <textarea id="editor_script" placeholder="Paste or edit the script"></textarea>
+        <label for="editor_background">Background</label>
+        <div class="flex">
+          <select id="editor_background" style="flex:1 1 auto"><option value="">(none — static title)</option></select>
+          <button type="button" class="secondary" id="btn_refresh_bgs">Refresh</button>
+          <button type="button" class="secondary" id="btn_seed_bgs">Seed</button>
+        </div>
+        <div class="flex">
+          <label class="inline" style="gap:6px"><input type="checkbox" id="editor_subtitles" checked> Burn subtitles</label>
+          <label class="inline" style="gap:6px">Voice <select id="editor_voice"><option value="">(default)</option></select></label>
+          <button type="button" class="secondary" id="btn_refresh_voices">Refresh voices</button>
+          <label class="inline" style="gap:6px">Rate <input id="editor_rate" type="number" min="120" max="220" step="5" value="160" style="width:90px"></label>
+        </div>
+        <div class="flex">
+          <label class="inline" style="gap:6px">Preview text
+            <input id="editor_preview_text" placeholder="This is a sample voice." value="This is a sample voice." style="width:220px">
+          </label>
+          <button type="button" id="btn_preview_voice">Preview voice</button>
+        </div>
+        <audio id="voice_preview_audio" controls style="width:100%;margin-top:8px;display:none"></audio>
+        <div class="flex">
+          <label class="inline" style="gap:6px">Target duration (sec)
+            <input id="editor_duration" type="number" min="0" step="5" value="120" style="width:110px">
+          </label>
+          <label class="inline" style="gap:6px"><input type="checkbox" id="editor_music"> Background music</label>
+          <label class="inline" style="gap:6px">Music volume
+            <input id="editor_music_volume" type="number" min="0" max="1" step="0.05" value="0.15" style="width:90px">
+          </label>
+          <label class="inline" style="gap:6px"><input type="checkbox" id="editor_ducking" checked> Duck under voice</label>
+          <label class="inline" style="gap:6px"><input type="checkbox" id="editor_draw_title" checked> Overlay title</label>
+        </div>
+        <div class="flex">
+          <button type="submit">Render</button>
+          <button type="button" class="secondary" onclick="closeEditorModal()">Cancel</button>
+        </div>
+        <div class="small muted" id="editor_note" style="margin-top:8px"></div>
+      </form>
+    </div>
+  </div>
   <script>
     const esc = (value) => String(value ?? '').replace(/[&<>]/g, (ch) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
     let publishers = [];
     let profiles = [];
     let jobs = [];
     let schedules = [];
+  let backgrounds = [];
+  let voices = [];
+  let publisherStates = {};
     const profileSelect = document.getElementById('gen_profile');
     profileSelect.innerHTML = '<option value="">(loading profiles...)</option>';
     const scheduleModal = document.getElementById('scheduleModal');
@@ -253,6 +305,78 @@
       return await res.json();
     }
 
+    async function loadBackgrounds() {
+      try {
+        const data = await fetchJSON('/ai/video/backgrounds');
+        backgrounds = data.backgrounds || [];
+      } catch (e) {
+        backgrounds = [];
+      }
+      const sel = document.getElementById('editor_background');
+      if (!sel) return;
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">(none — static title)</option>' + backgrounds.map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join('');
+      if (cur && backgrounds.includes(cur)) sel.value = cur;
+    }
+
+    async function seedBackgroundsInUi(noteEl) {
+      try {
+        await fetchJSON('/ai/video/backgrounds/seed', { method: 'POST' });
+        await loadBackgrounds();
+        if (noteEl) noteEl.textContent = 'Backgrounds seeded.';
+      } catch (e) {
+        if (noteEl) noteEl.textContent = 'Seed failed: ' + e.message;
+      }
+    }
+
+    async function loadVoices() {
+      try {
+        const data = await fetchJSON('/ai/voices');
+        voices = data.voices || [];
+      } catch (e) {
+        voices = [];
+      }
+      const sel = document.getElementById('editor_voice');
+      if (!sel) return;
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">(default)</option>' + voices.map((v) => `<option value="${esc(v.name || v.id || '')}">${esc(v.name || v.id || '')}</option>`).join('');
+      if (cur) sel.value = cur;
+      const note = document.getElementById('editor_note');
+      if ((!voices || !voices.length) && note) {
+        note.textContent = 'No local TTS voices detected. Install espeak-ng for offline voices.';
+      }
+    }
+
+    async function previewVoice() {
+      const voice = document.getElementById('editor_voice').value.trim() || '';
+      const rateRaw = document.getElementById('editor_rate').value;
+      const rate = rateRaw ? Number(rateRaw) : undefined;
+      const text = document.getElementById('editor_preview_text').value.trim() || 'This is a sample voice.';
+      const note = document.getElementById('editor_note');
+      const audio = document.getElementById('voice_preview_audio');
+      if (note) note.textContent = 'Generating voice preview...';
+      try {
+        const res = await fetch('/ai/voices/preview', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ text, voice, rate }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const url = data?.preview?.url;
+        if (url && audio) {
+          audio.src = url;
+          audio.style.display = 'block';
+          await audio.play().catch(() => {});
+          if (note) note.textContent = 'Preview ready.';
+        } else {
+          if (note) note.textContent = 'Preview failed: no URL returned';
+        }
+      } catch (err) {
+        if (note) note.textContent = 'Preview failed: ' + (err?.message || String(err));
+      }
+    }
+
     async function loadPublishers() {
       try {
         const data = await fetchJSON('/ai/publishers');
@@ -278,7 +402,7 @@
       publishers.forEach((p) => {
         const card = document.createElement('div');
         card.className = 'publisher-card';
-        const status = publisherStates[p.slug];
+        const status = publisherStates[p.slug] || null;
         const statusClass = status ? (status.ok ? 'ready' : 'error') : 'muted';
         const statusLabel = status ? status.message : 'No health check run yet';
         const required = (p.required_env || []).map((item) => `<span class="chip">${esc(item)}</span>`).join(' ');
@@ -518,11 +642,20 @@
           <div class="small job-schedule-summary" style="margin-top:8px"></div>
           <div class="actions" style="margin-top:10px">
             <button type="button" class="schedule-trigger">${esc(buttonLabel)}</button>
+            <button type="button" class="secondary to-video-trigger">Make video</button>
           </div>
           <details style="margin-top:10px">
             <summary class="small">View output</summary>
             <pre>${esc(j.generated_content || '')}</pre>
           </details>
+          <div class="small" style="margin-top:10px;display:none" data-video-status></div>
+          <div style="margin-top:10px;display:none" data-video-preview>
+            <video controls playsinline style="width:100%;border-radius:10px;border:1px solid #1f2a3a"></video>
+            <div class="flex" style="margin-top:8px">
+              <button type="button" class="secondary edit-video-trigger">Edit & re-render</button>
+              <a class="secondary" target="_blank" data-video-link>Open file</a>
+            </div>
+          </div>
         `;
         wrap.appendChild(div);
         const summaryEl = div.querySelector('.job-schedule-summary');
@@ -532,6 +665,138 @@
         const trigger = div.querySelector('.schedule-trigger');
         if (trigger) {
           trigger.addEventListener('click', () => openScheduleModal(j.id, primaryPlatform));
+        }
+        const toVideo = div.querySelector('.to-video-trigger');
+        const videoStatus = div.querySelector('[data-video-status]');
+        const previewWrap = div.querySelector('[data-video-preview]');
+        const videoEl = previewWrap ? previewWrap.querySelector('video') : null;
+        const videoLink = previewWrap ? previewWrap.querySelector('[data-video-link]') : null;
+        if (toVideo && videoStatus) {
+          toVideo.addEventListener('click', async () => {
+            toVideo.disabled = true;
+            videoStatus.style.display = 'block';
+            videoStatus.textContent = 'Rendering video...';
+            try {
+              const res = await fetch('/ai/video', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ job_id: j.id }),
+              });
+              if (!res.ok) throw new Error(await res.text());
+              const data = await res.json();
+              const url = data?.video?.url;
+              if (url) {
+                const abs = url; // same-origin path
+                videoStatus.textContent = 'Done';
+                if (previewWrap && videoEl && videoLink) {
+                  previewWrap.style.display = 'block';
+                  videoEl.src = abs;
+                  videoLink.href = abs;
+                  videoLink.textContent = abs;
+                } else {
+                  videoStatus.innerHTML = `Done: <a href="${esc(abs)}" target="_blank">${esc(abs)}</a>`;
+                }
+              } else {
+                videoStatus.textContent = 'Done, but no URL returned';
+              }
+            } catch (err) {
+              videoStatus.textContent = 'Video failed: ' + (err?.message || String(err));
+            } finally {
+              toVideo.disabled = false;
+            }
+          });
+        }
+
+        const editTrigger = div.querySelector('.edit-video-trigger');
+        if (editTrigger) {
+          editTrigger.addEventListener('click', () => openEditorModal(j));
+        }
+      });
+    }
+
+    const editorModal = document.getElementById('editorModal');
+    const editorBackdrop = document.getElementById('editorBackdrop');
+    const editorForm = document.getElementById('videoEditorForm');
+    function openEditorModal(job) {
+      if (!editorModal || !editorBackdrop || !editorForm) return;
+      document.getElementById('editor_job_id').value = String(job.id);
+      document.getElementById('editor_title').value = job.title || '';
+      document.getElementById('editor_script').value = job.generated_content || '';
+  loadBackgrounds();
+  loadVoices();
+      document.getElementById('editor_note').textContent = '';
+      editorBackdrop.classList.add('active');
+      editorModal.classList.add('active');
+      // Wire action buttons
+      const btnBgs = document.getElementById('btn_refresh_bgs');
+      if (btnBgs) btnBgs.onclick = () => loadBackgrounds();
+      const btnSeed = document.getElementById('btn_seed_bgs');
+      if (btnSeed) btnSeed.onclick = () => seedBackgroundsInUi(document.getElementById('editor_note'));
+      const btnVoices = document.getElementById('btn_refresh_voices');
+      if (btnVoices) btnVoices.onclick = () => loadVoices();
+      const btnPrev = document.getElementById('btn_preview_voice');
+      if (btnPrev) btnPrev.onclick = () => previewVoice();
+    }
+    function closeEditorModal() {
+      if (!editorModal || !editorBackdrop || !editorForm) return;
+      editorBackdrop.classList.remove('active');
+      editorModal.classList.remove('active');
+      editorForm.reset();
+      document.getElementById('editor_note').textContent = '';
+    }
+    if (editorBackdrop) editorBackdrop.addEventListener('click', closeEditorModal);
+    if (editorModal) editorModal.addEventListener('click', (e) => { if (e.target === editorModal) closeEditorModal(); });
+    if (editorForm) {
+      editorForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const jobId = Number(document.getElementById('editor_job_id').value);
+        const title = document.getElementById('editor_title').value.trim();
+        const script = document.getElementById('editor_script').value.trim();
+  const background = document.getElementById('editor_background').value.trim();
+  const subtitles = document.getElementById('editor_subtitles').checked;
+  const tts_voice = document.getElementById('editor_voice').value.trim();
+  const tts_rate = Number(document.getElementById('editor_rate').value) || undefined;
+  const min_duration = Number(document.getElementById('editor_duration').value) || undefined;
+  const music = document.getElementById('editor_music').checked;
+  const music_volume_raw = document.getElementById('editor_music_volume').value;
+  const music_volume = music_volume_raw === '' ? undefined : Number(music_volume_raw);
+  const ducking = document.getElementById('editor_ducking').checked;
+  const draw_title = document.getElementById('editor_draw_title').checked;
+        const note = document.getElementById('editor_note');
+        if (!title || !script) {
+          note.textContent = 'Title and script are required';
+          return;
+        }
+        note.textContent = 'Rendering...';
+        try {
+          const res = await fetch('/ai/video', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              job_id: jobId || undefined,
+              title,
+              script,
+              background,
+              subtitles,
+              tts_voice,
+              tts_rate,
+              min_duration,
+              music,
+              music_volume,
+              ducking,
+              draw_title,
+            }),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          const data = await res.json();
+          const url = data?.video?.url;
+          if (url) {
+            note.innerHTML = `Done: <a href="${esc(url)}" target="_blank">${esc(url)}</a>`;
+          } else {
+            note.textContent = 'Done, but no URL returned';
+          }
+        } catch (err) {
+          note.textContent = 'Video failed: ' + (err?.message || String(err));
         }
       });
     }
@@ -806,6 +1071,21 @@
     if (scheduleForm) {
       scheduleForm.addEventListener('submit', submitScheduleForm);
     }
+
+    // Show AI mode and reachability from the backend
+    fetch('/ai/config')
+      .then(r => r.ok ? r.json() : {})
+      .then(cfg => {
+        const info = document.getElementById('aiModeInfo');
+        if (!info || !cfg) return;
+        const local = cfg.local ? 'local' : 'remote';
+        const reach = cfg.reachable ? 'reachable' : 'not reachable';
+        info.textContent = `AI mode: ${local} · model: ${cfg.model || '?'} · base: ${cfg.api_base || '?'} · ${reach}`;
+      })
+      .catch(() => {
+        const info = document.getElementById('aiModeInfo');
+        if (info) info.textContent = 'AI mode: (failed to load config)';
+      });
 
     loadPublishers();
     loadProfiles();

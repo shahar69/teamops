@@ -1,1407 +1,909 @@
-import os, time, base64, hmac, hashlib, json, sys, traceback
-from datetime import datetime, timezone
-from typing import Optional, List, Tuple
-from fastapi import FastAPI, HTTPException, Request, Form, Query
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, PlainTextResponse
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from jinja2 import Environment, FileSystemLoader, select_autoescape, TemplateNotFound
+from pathlib import Path
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import IntegrityError
-from passlib.hash import bcrypt
+from datetime import datetime, timezone
+import os
+import hmac
+import hashlib
 import httpx
-from jinja2 import Environment, FileSystemLoader, TemplateNotFound
-from publishers import (
-    PublisherConfigError,
-    PublisherError,
-    get_publisher,
-    list_publishers,
-)
+import asyncio
+from typing import List, Dict, Any, Optional, Tuple
+from datetime import datetime
+import json
 
-from .scheduler import AIScheduleDispatcher
+# Minimal imports for scheduler and publishers
+# (removed top-level AIScheduleDispatcher import to avoid import-time failures)
+from backend.app.publishers import get_publisher
+from backend.app import media as media_mod
 
 # ---------- Config ----------
-DATABASE_URL = os.environ["DATABASE_URL"]  # e.g. postgresql+psycopg2://teamops:pass@db:5432/teamops
-SECRET = os.environ.get("BACKEND_SECRET", "change-me-please")
+# Default to local SQLite for out-of-the-box local runs; override via DATABASE_URL if needed
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////tmp/teamops_local.sqlite3")
+BACKEND_SECRET = os.getenv("BACKEND_SECRET", "dev-secret")
+AI_LOCAL = os.getenv("AI_LOCAL", "true").lower() in ("1", "true", "yes")
+AI_API_KEY = os.getenv("AI_API_KEY")
+_default_base = "http://127.0.0.1:11434/v1" if AI_LOCAL else "https://api.openai.com/v1"
+AI_API_BASE = os.getenv("AI_API_BASE", _default_base)
+_default_model = "llama3.1" if AI_LOCAL else "gpt-3.5-turbo"
+AI_MODEL = os.getenv("AI_MODEL", _default_model)
+AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "30"))
 
-PVE_HOST = os.environ.get("PVE_HOST", "https://proxmox:8006")
-PVE_TOKEN_ID = os.environ.get("PVE_TOKEN_ID", "teamops@pve!dash")
-PVE_TOKEN_SECRET = os.environ.get("PVE_TOKEN_SECRET", "")
+engine = create_engine(DATABASE_URL, future=True)
 
-NC_BASE = os.environ.get("NEXTCLOUD_BASE","http://nextcloud")
-NC_ADMIN = os.environ.get("NEXTCLOUD_ADMIN","admin")
-NC_ADMIN_PASS = os.environ.get("NEXTCLOUD_ADMIN_PASS","admin")
-
-KUMA_URL = os.environ.get("KUMA_URL", "http://kuma:3001")
-KUMA_TOKEN = os.environ.get("KUMA_TOKEN", "")
-
-AI_MODEL = os.environ.get("AI_MODEL", "gpt-4o-mini")
-AI_API_BASE = os.environ.get("AI_API_BASE", "https://api.openai.com/v1")
-AI_API_KEY = os.environ.get("AI_API_KEY", "")
-AI_TIMEOUT = float(os.environ.get("AI_TIMEOUT", "45"))
-AI_SCHEDULE_INTERVAL_SECONDS = int(os.environ.get("AI_SCHEDULE_INTERVAL_SECONDS", "60"))
-AI_SCHEDULE_BATCH_SIZE = int(os.environ.get("AI_SCHEDULE_BATCH_SIZE", "20"))
-
-# ---------- DB ----------
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-Session = sessionmaker(bind=engine)
-
-# ---------- Jinja ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
-env = Environment(loader=FileSystemLoader(TEMPLATE_DIR), autoescape=True)
-
-# ---------- App ----------
-app = FastAPI(title="TeamOps Backend")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+TEMPLATES_DIR = str((Path(__file__).resolve().parent / "templates").as_posix())
+templates = Environment(
+    loader=FileSystemLoader(TEMPLATES_DIR),
+    autoescape=select_autoescape(["html", "xml"])
 )
 
-# ---------- DB bootstrap ----------
+app = FastAPI()
+_scheduler: Optional[Any] = None
+
 def init_db():
+    """Create/upgrade minimal schema required by the UI for both SQLite and Postgres."""
+    url = str(engine.url).lower()
+    is_sqlite = url.startswith("sqlite")
+
+    def _ensure_sqlite_columns(conn, table: str, add_sql: List[Tuple[str, str]]):
+        cols = {row[1] for row in conn.execute(text(f"PRAGMA table_info({table})")).fetchall()}
+        for col_name, ddl in add_sql:
+            if col_name not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
     with engine.begin() as conn:
-        conn.execute(text("""
-        CREATE TABLE IF NOT EXISTS users(
-            id SERIAL PRIMARY KEY,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            role TEXT NOT NULL CHECK (role IN ('leader','coowner')),
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS notes(
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS announcements(
-            id SERIAL PRIMARY KEY,
-            author_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            content TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS audit(
-            id SERIAL PRIMARY KEY,
-            actor_email TEXT NOT NULL,
-            action TEXT NOT NULL,
-            meta JSONB,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS vm_permissions(
-            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            node TEXT NOT NULL,
-            vmid INTEGER NOT NULL,
-            can_power BOOLEAN DEFAULT true,
-            can_snapshot BOOLEAN DEFAULT false,
-            PRIMARY KEY(user_id, node, vmid)
-        );
-        CREATE TABLE IF NOT EXISTS ci_profiles(
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            ciuser TEXT,
-            cipassword TEXT,
-            sshkeys TEXT,
-            ipconfig0 TEXT,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS customers(
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            contact TEXT,
-            notes TEXT,
-            created_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS vm_customers(
-            node TEXT NOT NULL,
-            vmid INTEGER NOT NULL,
-            customer_id INTEGER REFERENCES customers(id) ON DELETE CASCADE,
-            PRIMARY KEY(node, vmid)
-        );
-        CREATE TABLE IF NOT EXISTS ai_content_profiles(
-            id SERIAL PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL,
-            tone TEXT,
-            voice TEXT,
-            target_platform TEXT,
-            guidelines TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS ai_content_jobs(
-            id SERIAL PRIMARY KEY,
-            profile_id INTEGER REFERENCES ai_content_profiles(id) ON DELETE SET NULL,
-            title TEXT NOT NULL,
-            keywords TEXT,
-            brief TEXT,
-            data_sources TEXT,
-            content_type TEXT,
-            generated_content TEXT,
-            status TEXT NOT NULL DEFAULT 'draft',
-            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        );
-        CREATE TABLE IF NOT EXISTS ai_content_schedules(
-            id SERIAL PRIMARY KEY,
-            job_id INTEGER REFERENCES ai_content_jobs(id) ON DELETE CASCADE,
-            platform TEXT NOT NULL,
-            scheduled_for TIMESTAMP NOT NULL,
-            status TEXT NOT NULL DEFAULT 'scheduled',
-            created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
-            last_attempted_at TIMESTAMP,
-            result TEXT,
-            created_at TIMESTAMP DEFAULT NOW(),
-            updated_at TIMESTAMP DEFAULT NOW()
-        );
-        """))
-init_db()
+        if is_sqlite:
+            # Profiles
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_content_profiles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    tone TEXT,
+                    voice TEXT,
+                    target_platform TEXT,
+                    guidelines TEXT,
+                    settings TEXT DEFAULT '{}',
+                    created_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+                    updated_at DATETIME
+                )
+                """
+            ))
+            _ensure_sqlite_columns(conn, "ai_content_profiles", [
+                ("tone", "tone TEXT"),
+                ("voice", "voice TEXT"),
+                ("target_platform", "target_platform TEXT"),
+                ("guidelines", "guidelines TEXT"),
+                ("updated_at", "updated_at DATETIME"),
+            ])
 
-schedule_dispatcher = AIScheduleDispatcher(
-    engine,
-    interval_seconds=AI_SCHEDULE_INTERVAL_SECONDS,
-    batch_size=AI_SCHEDULE_BATCH_SIZE,
-)
+            # Jobs
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_content_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    profile_id INTEGER,
+                    title TEXT,
+                    keywords TEXT,
+                    content_type TEXT,
+                    brief TEXT,
+                    data_sources TEXT,
+                    extra TEXT,
+                    generated_content TEXT,
+                    status TEXT DEFAULT 'completed',
+                    created_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+                    updated_at DATETIME
+                )
+                """
+            ))
+            _ensure_sqlite_columns(conn, "ai_content_jobs", [
+                ("title", "title TEXT"),
+                ("keywords", "keywords TEXT"),
+                ("content_type", "content_type TEXT"),
+                ("brief", "brief TEXT"),
+                ("data_sources", "data_sources TEXT"),
+                ("extra", "extra TEXT"),
+                ("generated_content", "generated_content TEXT"),
+                ("updated_at", "updated_at DATETIME"),
+            ])
 
+            # Schedules
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_content_schedules (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id INTEGER,
+                    platform TEXT,
+                    scheduled_for DATETIME NOT NULL,
+                    status TEXT DEFAULT 'scheduled',
+                    result TEXT,
+                    attempts INTEGER DEFAULT 0,
+                    last_attempted_at DATETIME,
+                    delivery_meta TEXT DEFAULT '{}',
+                    created_at DATETIME DEFAULT (STRFTIME('%Y-%m-%d %H:%M:%f', 'now')),
+                    updated_at DATETIME
+                )
+                """
+            ))
+            _ensure_sqlite_columns(conn, "ai_content_schedules", [
+                ("job_id", "job_id INTEGER"),
+                ("platform", "platform TEXT"),
+                ("result", "result TEXT"),
+                ("attempts", "attempts INTEGER DEFAULT 0"),
+                ("last_attempted_at", "last_attempted_at DATETIME"),
+                ("delivery_meta", "delivery_meta TEXT DEFAULT '{}'"),
+                ("updated_at", "updated_at DATETIME"),
+            ])
+        else:
+            # Postgres schema
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_content_profiles (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    tone TEXT,
+                    voice TEXT,
+                    target_platform TEXT,
+                    guidelines TEXT,
+                    settings JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ
+                )
+                """
+            ))
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_content_jobs (
+                    id SERIAL PRIMARY KEY,
+                    profile_id INTEGER REFERENCES ai_content_profiles(id),
+                    title TEXT,
+                    keywords TEXT,
+                    content_type TEXT,
+                    brief TEXT,
+                    data_sources TEXT,
+                    extra TEXT,
+                    generated_content TEXT,
+                    status TEXT DEFAULT 'completed',
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ
+                )
+                """
+            ))
+            conn.execute(text(
+                """
+                CREATE TABLE IF NOT EXISTS ai_content_schedules (
+                    id SERIAL PRIMARY KEY,
+                    job_id INTEGER REFERENCES ai_content_jobs(id),
+                    platform TEXT,
+                    scheduled_for TIMESTAMPTZ NOT NULL,
+                    status TEXT DEFAULT 'scheduled',
+                    result TEXT,
+                    attempts INTEGER DEFAULT 0,
+                    last_attempted_at TIMESTAMPTZ,
+                    delivery_meta JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ DEFAULT now(),
+                    updated_at TIMESTAMPTZ
+                )
+                """
+            ))
 
-@app.on_event("startup")
-async def start_schedule_dispatcher():
-    await schedule_dispatcher.start()
+def now_iso() -> str:
+    return datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z")
 
-
-@app.on_event("shutdown")
-async def stop_schedule_dispatcher():
-    await schedule_dispatcher.stop()
-
-# ---------- Sessions ----------
-def sign_session(email: str) -> str:
-    t = str(int(time.time()))
-    msg = f"{email}|{t}"
-    sig = hmac.new(SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
-    return base64.urlsafe_b64encode(f"{msg}|{sig}".encode()).decode()
-
-def verify_session(token: str) -> Optional[str]:
+def parse_schedule_time(val: str) -> datetime:
+    # Expect 'YYYY-MM-DDTHH:MM' or with seconds; store naive UTC for sqlite
+    if not val:
+        raise HTTPException(status_code=400, detail="scheduled_for required")
+    s = val.strip()
+    if len(s) == 16:
+        s += ":00"
     try:
-        raw = base64.urlsafe_b64decode(token.encode()).decode()
-        email, ts, sig = raw.split("|")
-        expect = hmac.new(SECRET.encode(), f"{email}|{ts}".encode(), hashlib.sha256).hexdigest()
-        if not hmac.compare_digest(expect, sig):
-            return None
-        if time.time() - int(ts) > 60*60*24*7:  # 7 days
-            return None
-        return email
+        return datetime.fromisoformat(s)
     except Exception:
-        return None
+        raise HTTPException(status_code=400, detail="Invalid datetime format; use YYYY-MM-DDTHH:MM")
 
-def render(name: str, **ctx):
+def render_html(name: str, ctx: Dict[str, Any] = None) -> HTMLResponse:
+    ctx = ctx or {}
     try:
-        tpl = env.get_template(name)
+        tpl = templates.get_template(name)
         return HTMLResponse(tpl.render(**ctx))
-    except TemplateNotFound:
-        msg = f"[TEMPLATE ERROR] Not found: {name}"
-        print(msg, file=sys.stderr)
-        return PlainTextResponse(msg, status_code=500)
-    except Exception as e:
-        print(f"[RENDER ERROR] {name}: {e}", file=sys.stderr)
-        traceback.print_exc()
-        return PlainTextResponse("Internal Server Error", status_code=500)
-
-def current_email(req: Request) -> Optional[str]:
-    tok = req.cookies.get("session", "")
-    return verify_session(tok) if tok else None
-
-def require_user(req: Request) -> Tuple[int,str,str]:
-    email = current_email(req)
-    if not email:
-        raise HTTPException(status_code=401, detail="login required")
-    with engine.begin() as conn:
-        row = conn.execute(text("SELECT id,email,role FROM users WHERE email=:e"), {"e": email}).fetchone()
-    if not row:
-        raise HTTPException(status_code=401, detail="unknown user")
-    return row.id, row.email, row.role
-
-def audit(email: str, action: str, meta: dict):
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO audit(actor_email,action,meta) VALUES (:e,:a,:m)"),
-                     {"e":email, "a":action, "m":json.dumps(meta)})
-
-def ai_call(messages: List[dict]) -> Tuple[str, str, str]:
-    if not AI_API_KEY:
-        note = "AI provider is not configured. Set OPENAI_API_KEY to enable live generations."
-        return (
-            "needs_config",
-            "[offline] AI automation is not configured yet. Provide OPENAI_API_KEY/AI_MODEL to enable live generations.",
-            note,
+    except TemplateNotFound as e:
+        return HTMLResponse(
+            f"<html><body><h3>{name}</h3><pre>TemplateNotFound: {e}; loader dir: {TEMPLATES_DIR}</pre></body></html>",
+            status_code=500,
         )
-    try:
-        url = AI_API_BASE.rstrip('/') + "/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {AI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": AI_MODEL,
-            "messages": messages,
-            "temperature": 0.65,
-        }
-        resp = httpx.post(url, headers=headers, json=payload, timeout=AI_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        choices = data.get("choices") or []
-        if not choices:
-            raise HTTPException(502, "AI provider returned no completions")
-        content = choices[0].get("message", {}).get("content", "").strip()
-        if not content:
-            raise HTTPException(502, "AI provider returned empty content")
-        note = f"Generated via {AI_MODEL}"
-        return "ready", content, note
-    except httpx.HTTPStatusError as e:
-        print(f"[AI ERROR] status {e.response.status_code}: {e.response.text[:200]}", file=sys.stderr)
-        raise HTTPException(502, "AI provider error")
-    except httpx.HTTPError as e:
-        print(f"[AI ERROR] http {e}", file=sys.stderr)
-        raise HTTPException(502, "AI request failed")
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"[AI ERROR] unexpected {e}", file=sys.stderr)
-        raise HTTPException(500, "AI request failed")
+        return HTMLResponse(f"<html><body><h3>{name}</h3><pre>{e}</pre></body></html>", status_code=500)
 
-def format_profile(row) -> dict:
-    return {
-        "id": row.id,
-        "name": row.name,
-        "tone": row.tone or "",
-        "voice": row.voice or "",
-        "target_platform": row.target_platform or "",
-        "guidelines": row.guidelines or "",
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-    }
+def sign_session(data: str) -> str:
+    sig = hmac.new(BACKEND_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()
+    return f"{data}:{sig}"
 
-def format_job(row) -> dict:
-    return {
-        "id": row.id,
-        "profile_id": row.profile_id,
-        "profile_name": row.profile_name or "",
-        "profile_platform": getattr(row, "profile_platform", "") or "",
-        "title": row.title,
-        "keywords": row.keywords or "",
-        "brief": row.brief or "",
-        "data_sources": row.data_sources or "",
-        "content_type": row.content_type or "",
-        "generated_content": row.generated_content or "",
-        "status": row.status,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-    }
-
-SCHEDULE_COLUMNS = """
-    s.id,
-    s.job_id,
-    j.title AS job_title,
-    j.content_type AS job_content_type,
-    COALESCE(p.name, '') AS job_profile_name,
-    COALESCE(p.target_platform, '') AS job_profile_platform,
-    s.platform,
-    s.status,
-    TO_CHAR(s.scheduled_for, 'YYYY-MM-DD HH24:MI') AS scheduled_for,
-    TO_CHAR(s.scheduled_for, 'YYYY-MM-DD"T"HH24:MI') AS scheduled_for_iso,
-    TO_CHAR(s.created_at, 'YYYY-MM-DD HH24:MI') AS created_at,
-    TO_CHAR(s.updated_at, 'YYYY-MM-DD HH24:MI') AS updated_at,
-    TO_CHAR(s.last_attempted_at, 'YYYY-MM-DD HH24:MI') AS last_attempted_at,
-    COALESCE(s.result, '') AS result
-"""
-
-SCHEDULE_SELECT_BASE = f"""
-    SELECT {SCHEDULE_COLUMNS}
-    FROM ai_content_schedules s
-    JOIN ai_content_jobs j ON j.id = s.job_id
-    LEFT JOIN ai_content_profiles p ON p.id = j.profile_id
-"""
-
-SCHEDULE_STATUSES = {"scheduled", "posted", "failed", "canceled"}
-
-
-def format_schedule(row) -> dict:
-    return {
-        "id": row.id,
-        "job_id": row.job_id,
-        "job_title": row.job_title,
-        "job_content_type": row.job_content_type or "",
-        "job_profile_name": row.job_profile_name or "",
-        "job_profile_platform": row.job_profile_platform or "",
-        "platform": row.platform,
-        "status": row.status,
-        "scheduled_for": row.scheduled_for,
-        "scheduled_for_iso": row.scheduled_for_iso,
-        "created_at": row.created_at,
-        "updated_at": row.updated_at,
-        "last_attempted_at": row.last_attempted_at,
-        "result": row.result or "",
-    }
-
-
-def parse_schedule_time(value: str) -> datetime:
-    if not value:
-        raise HTTPException(400, "schedule time required")
-    raw = value.strip()
+def verify_session(signed: str) -> bool:
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        raise HTTPException(400, "invalid schedule time")
-    if parsed.tzinfo:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
-    return parsed
+        data, sig = signed.rsplit(":", 1)
+    except Exception:
+        return False
+    expected = hmac.new(BACKEND_SECRET.encode(), data.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, sig)
 
+async def ai_call(messages: List[Dict[str, str]], temperature: float = 0.7, timeout: float = None) -> Dict[str, Any]:
+    """Call an OpenAI-compatible chat completions endpoint.
 
-def fetch_schedule(conn, schedule_id: int):
-    return conn.execute(text(SCHEDULE_SELECT_BASE + " WHERE s.id=:id"), {"id": schedule_id}).fetchone()
+    Local mode: when AI_LOCAL=true, no API key is required and the default base is http://127.0.0.1:11434/v1 (Ollama-compatible).
+    """
+    timeout = timeout or AI_TIMEOUT
+    url = f"{AI_API_BASE.rstrip('/')}/chat/completions"
+    payload = {"model": AI_MODEL, "messages": messages, "temperature": temperature}
+    headers = {"Content-Type": "application/json"}
+    if AI_API_KEY:
+        headers["Authorization"] = f"Bearer {AI_API_KEY}"
+    elif not AI_LOCAL:
+        # no API key and not in local mode — surface clear error to enable fallback
+        raise HTTPException(status_code=500, detail="AI_API_KEY not configured (set AI_LOCAL=true to use a local server)")
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(url, json=payload, headers=headers)
+            r.raise_for_status()
+            return r.json()
+    except httpx.HTTPError as e:
+        # map HTTPX errors to a 502 for clarity
+        raise HTTPException(status_code=502, detail=f"AI provider error: {str(e)}")
 
-CONTENT_BLUEPRINTS = {
-    "social-post": "Craft a set of 3 platform-ready social media posts (TikTok, Instagram Reels, Twitter/X). Each should have a hook, supporting body, and CTA. Include relevant hashtags.",
-    "reddit-story": "Write a first-person Reddit-style storytelling post with a captivating title, clear conflict, and satisfying resolution. Keep it authentic and emotionally engaging.",
-    "video-script": "Develop a short-form video script with sections: Hook, Scene Beats, Voiceover, On-screen text, CTA. Keep pacing fast and visual cues clear.",
-}
-
-def build_ai_messages(profile: dict, title: str, content_type: str, keywords: str, brief: str, data_sources: str, extra: str) -> List[dict]:
-    system = (
-        "You are an elite content automation assistant specialized in creating viral, monetizable narratives. "
-        "Always respect the provided tone, target platform, and brand voice. Ensure outputs are ready to copy/paste."
-    )
-    tone_line = f"Preferred tone: {profile['tone']}" if profile.get("tone") else ""
-    voice_line = f"Voice: {profile['voice']}" if profile.get("voice") else ""
-    platform_line = f"Target platform(s): {profile['target_platform']}" if profile.get("target_platform") else ""
-    guidelines = profile.get("guidelines") or ""
-    blueprint = CONTENT_BLUEPRINTS.get(content_type, "Deliver a polished narrative optimized for engagement and monetization.")
-    user_prompt = f"""
-Project Title: {title}
-Content focus: {blueprint}
-
-Keywords / SEO focus: {keywords or 'n/a'}
-Creative brief:
-{brief or '(none)'}
-
-Supporting data sources or context:
-{data_sources or '(none)'}
-
-Additional operator instructions:
-{extra or '(none)'}
-
-Deliver the final asset in Markdown. Provide:
-- A punchy title or hook
-- Main body content according to the content focus
-- Three platform-specific captions with hashtags
-- Suggested visual or audio cues when relevant
-- Monetization or CTA ideas at the end
-"""
-    sys_msg = "\n".join([line for line in [system, tone_line, voice_line, platform_line, guidelines] if line])
+def build_ai_messages(system_prompt: str, user_prompt: str) -> List[Dict[str, str]]:
     return [
-        {"role": "system", "content": sys_msg},
-        {"role": "user", "content": user_prompt.strip()},
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt}
     ]
 
-# ---------- Bootstrap users ----------
-@app.post("/admin/init")
-def admin_init(payload: dict):
-    admin_email = payload["admin_email"]; admin_pass = payload["admin_pass"]
-    oded_email = payload["oded_email"]; oded_pass = payload["oded_pass"]
-    orel_email = payload["orel_email"]; orel_pass = payload["orel_pass"]
-    with engine.begin() as conn:
-        for email, pwd, role in [
-            (admin_email, admin_pass, "leader"),
-            (oded_email, oded_pass, "coowner"),
-            (orel_email, orel_pass, "coowner"),
-        ]:
-            conn.execute(text("""
-              INSERT INTO users(email,password_hash,role)
-              VALUES (:e,:p,:r)
-              ON CONFLICT (email) DO NOTHING
-            """), {"e": email, "p": bcrypt.hash(pwd), "r": role})
-    return {"ok": True}
 
-# ---------- Auth ----------
-@app.get("/ui/login", response_class=HTMLResponse)
-def login_form():
-    return render("login.html")
+@app.get("/ai/config")
+async def ai_config():
+    """Expose current AI configuration (non-sensitive) and reachability.
 
-@app.post("/ui/login")
-def do_login(email: str = Form(...), password: str = Form(...)):
-    with engine.begin() as conn:
-        row = conn.execute(text("SELECT password_hash FROM users WHERE email=:e"), {"e": email}).fetchone()
-    if not row or not bcrypt.verify(password, row.password_hash):
-        return render("login.html", error="Invalid credentials")
-    token = sign_session(email)
-    resp = RedirectResponse("/ui/announcements", status_code=302)
-    resp.set_cookie("session", token, httponly=True, samesite="lax")
-    return resp
+    Useful for local AI workflows to confirm the server is reachable and which model/base are active.
+    """
+    reachable = False
+    detail = None
+    try:
+        # Try a lightweight probe: GET /models (Ollama & most OpenAI-compatible servers expose this)
+        url = f"{AI_API_BASE.rstrip('/')}/models"
+        headers = {}
+        if AI_API_KEY:
+            headers["Authorization"] = f"Bearer {AI_API_KEY}"
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            r = await client.get(url, headers=headers)
+            reachable = r.status_code < 500
+    except Exception as e:
+        detail = str(e)
+    return {
+        "local": AI_LOCAL,
+        "api_base": AI_API_BASE,
+        "model": AI_MODEL,
+        "reachable": reachable,
+        "note": detail,
+    }
 
-@app.get("/ui/logout")
-def logout():
-    resp = RedirectResponse("/ui/login", status_code=302)
-    resp.delete_cookie("session")
-    return resp
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+    # Auto-seed basic content and sample backgrounds if empty
+    try:
+        seed_profiles_and_jobs()
+    except Exception as e:
+        print("Seed profiles/jobs warning:", e)
+    try:
+        if not media_mod.list_backgrounds():
+            media_mod.seed_backgrounds()
+    except Exception as e:
+        print("Seed backgrounds warning:", e)
+    global _scheduler
+    # Only start scheduler if explicitly enabled and database is not SQLite
+    enable = os.getenv("SCHEDULER_ENABLED", "false").lower() in ("1", "true", "yes")
+    is_sqlite = str(engine.url).lower().startswith("sqlite")
+    if enable and not is_sqlite:
+        try:
+            # local import to avoid hard crash if scheduler file missing or broken
+            from backend.app.scheduler import AIScheduleDispatcher
+            _scheduler = AIScheduleDispatcher(engine=engine)
+            await _scheduler.start()
+            print("Backend started. Scheduler running.")
+        except Exception as e:
+            # keep the app up even if scheduler can't start; surface a clear warning
+            print("Backend startup warning: scheduler failed to start:", e)
+    else:
+        print("Scheduler disabled (SCHEDULER_ENABLED not set or using SQLite)")
 
-# ---------- Team (Announcements) ----------
-@app.get("/ui/announcements", response_class=HTMLResponse)
-def ui_ann(req: Request):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        anns = conn.execute(text("""
-            SELECT a.content,
-                   COALESCE(u.email,'system') AS author,
-                   TO_CHAR(a.created_at, 'YYYY-MM-DD HH24:MI') as dt
-            FROM announcements a
-            LEFT JOIN users u ON a.author_id=u.id
-            ORDER BY a.id DESC LIMIT 100
-        """)).fetchall()
-    anns_fmt = [(r.content, r.author, r.dt) for r in anns]
-    return render("announcements.html", email=email, anns=anns_fmt, role=role)
+@app.on_event("shutdown")
+async def shutdown_event():
+    global _scheduler
+    if _scheduler:
+        try:
+            await _scheduler.stop()
+        except Exception as e:
+            print("Scheduler shutdown warning:", e)
+        _scheduler = None
+    print("Backend shutdown complete.")
 
-@app.post("/api/announcements")
-def post_ann(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    content = (payload.get("content") or "").strip()
-    if not content:
-        raise HTTPException(400,"empty")
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO announcements(author_id,content) VALUES (:uid,:c)"),{"uid":uid,"c":content})
-    audit(email, "announce", {"content": content[:160]})
-    return {"ok": True}
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
-# ---------- My Space ----------
-@app.get("/ui/user", response_class=HTMLResponse)
-def ui_user(req: Request):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        u = conn.execute(text("SELECT id,email,role FROM users WHERE id=:id"),{"id":uid}).fetchone()
-        notes = conn.execute(text("""
-            SELECT content, TO_CHAR(created_at,'YYYY-MM-DD HH24:MI')
-            FROM notes WHERE user_id=:id ORDER BY id DESC LIMIT 50
-        """),{"id":uid}).fetchall()
-    return render("user.html", viewer=email, u=u, notes=notes)
+# Mount media directory for serving generated videos locally
+try:
+    app.mount("/media", StaticFiles(directory=str(media_mod.MEDIA_DIR)), name="media")
+except Exception:
+    # In case MEDIA_DIR is not accessible at import time; this is non-fatal
+    pass
 
-@app.post("/api/notes")
-def add_note(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    content = (payload.get("content") or "").strip()
-    if not content:
-        raise HTTPException(400,"empty")
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO notes(user_id,content) VALUES (:uid,:c)"),{"uid":uid,"c":content})
-    audit(email, "note", {"content": content[:120]})
-    return {"ok": True}
-
-# ---------- Money Bots (AI Content) ----------
 @app.get("/ui/ai-content", response_class=HTMLResponse)
-def ui_ai_content(req: Request):
-    uid, email, role = require_user(req)
-    return render("ai_content.html", email=email)
+async def ui_ai_content(request: Request):
+    return render_html("ai_content.html")
 
+@app.get("/ui/{page}", response_class=HTMLResponse)
+async def ui_page(page: str):
+    name = page
+    if not name.endswith(".html"):
+        name = f"{name}.html"
+    return render_html(name)
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return render_html("ai_content.html")
+
+@app.get("/debug/templates")
+async def debug_templates():
+    try:
+        import os
+        listing = []
+        for entry in os.listdir(TEMPLATES_DIR):
+            listing.append(entry)
+        exists = True
+    except Exception as e:
+        listing = [str(e)]
+        exists = False
+    return {"templates_dir": TEMPLATES_DIR, "exists": exists, "entries": listing}
+
+@app.get("/ai/publishers")
+async def api_list_publishers():
+    from backend.app.publishers import list_publishers
+    return {"publishers": list_publishers()}
+
+@app.post("/ai/publishers/{slug}/health")
+async def api_publisher_health(slug: str):
+    pub = get_publisher(slug)
+    if not pub or not hasattr(pub, "health_check"):
+        return {"result": {"success": False, "message": "Publisher not available"}}
+    try:
+        res = pub.health_check()
+        # normalize response keys to success/message
+        if isinstance(res, dict):
+            if "ok" in res and "success" not in res:
+                res = {**res, "success": bool(res.get("ok"))}
+            if "detail" in res and "message" not in res:
+                res = {**res, "message": res.get("detail")}
+    except Exception as e:
+        res = {"success": False, "message": str(e)}
+    return {"result": res}
+
+# ---------- Profiles ----------
 @app.get("/ai/profiles")
-def ai_profiles(req: Request):
-    _uid, email, role = require_user(req)
+async def api_profiles_list():
     with engine.begin() as conn:
         rows = conn.execute(text(
             """
             SELECT id, name, tone, voice, target_platform, guidelines,
-                   TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                   TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
+                   created_at, updated_at
             FROM ai_content_profiles
-            ORDER BY ai_content_profiles.updated_at DESC, ai_content_profiles.id DESC
-            LIMIT 200
+            ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
             """
-        )).fetchall()
-    return {"profiles": [format_profile(r) for r in rows]}
+        )).mappings().all()
+    return {"profiles": [dict(r) for r in rows]}
 
 @app.post("/ai/profiles")
-def ai_profile_create(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    name = (payload.get("name") or "").strip()
+async def api_profiles_create(body: Dict[str, Any]):
+    name = (body.get("name") or "").strip()
     if not name:
-        raise HTTPException(400, "profile name required")
-    tone = (payload.get("tone") or "").strip()
-    voice = (payload.get("voice") or "").strip()
-    target = (payload.get("target_platform") or "").strip()
-    guidelines = (payload.get("guidelines") or "").strip()
-    with engine.begin() as conn:
-        try:
-            row = conn.execute(text(
-                """
-                INSERT INTO ai_content_profiles(name,tone,voice,target_platform,guidelines)
-                VALUES (:name,:tone,:voice,:target,:guidelines)
-                RETURNING id,name,tone,voice,target_platform,guidelines,
-                          TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                          TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
-                """
-            ), {
-                "name": name,
-                "tone": tone,
-                "voice": voice,
-                "target": target,
-                "guidelines": guidelines,
-            }).fetchone()
-        except IntegrityError:
-            raise HTTPException(409, "profile name already exists")
-    audit(email, "ai:profile:create", {"profile": name})
-    return {"profile": format_profile(row)}
-
-@app.put("/ai/profiles/{profile_id}")
-def ai_profile_update(req: Request, profile_id: int, payload: dict):
-    uid, email, role = require_user(req)
-    name = (payload.get("name") or "").strip()
-    if not name:
-        raise HTTPException(400, "profile name required")
-    tone = (payload.get("tone") or "").strip()
-    voice = (payload.get("voice") or "").strip()
-    target = (payload.get("target_platform") or "").strip()
-    guidelines = (payload.get("guidelines") or "").strip()
-    with engine.begin() as conn:
-        try:
-            row = conn.execute(text(
-                """
-                UPDATE ai_content_profiles
-                SET name=:name, tone=:tone, voice=:voice, target_platform=:target,
-                    guidelines=:guidelines, updated_at=NOW()
-                WHERE id=:id
-                RETURNING id,name,tone,voice,target_platform,guidelines,
-                          TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                          TO_CHAR(updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
-                """
-            ), {
-                "id": profile_id,
-                "name": name,
-                "tone": tone,
-                "voice": voice,
-                "target": target,
-                "guidelines": guidelines,
-            }).fetchone()
-        except IntegrityError:
-            raise HTTPException(409, "profile name already exists")
-    if not row:
-        raise HTTPException(404, "profile not found")
-    audit(email, "ai:profile:update", {"profile_id": profile_id})
-    return {"profile": format_profile(row)}
-
-@app.delete("/ai/profiles/{profile_id}")
-def ai_profile_delete(req: Request, profile_id: int):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        res = conn.execute(text("DELETE FROM ai_content_profiles WHERE id=:id"), {"id": profile_id})
-    if res.rowcount == 0:
-        raise HTTPException(404, "profile not found")
-    audit(email, "ai:profile:delete", {"profile_id": profile_id})
-    return {"ok": True}
-
-@app.get("/ai/jobs")
-def ai_jobs(req: Request, profile_id: Optional[int] = Query(None), limit: int = Query(20, ge=1, le=100)):
-    _uid, email, role = require_user(req)
-    base_sql = (
-        "SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name, COALESCE(p.target_platform,'') AS profile_platform, "
-        "j.title, j.keywords, j.brief, j.data_sources, "
-        "j.content_type, j.generated_content, j.status, "
-        "TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at, TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at "
-        "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id"
-    )
-    params = {"limit": limit}
-    if profile_id:
-        base_sql += " WHERE j.profile_id=:pid"
-        params["pid"] = profile_id
-    base_sql += " ORDER BY j.updated_at DESC, j.id DESC LIMIT :limit"
-    with engine.begin() as conn:
-        rows = conn.execute(text(base_sql), params).fetchall()
-    return {"jobs": [format_job(r) for r in rows]}
-
-@app.get("/ai/jobs/{job_id}")
-def ai_job_detail(req: Request, job_id: int):
-    _uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        row = conn.execute(text(
-            """
-            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name,
-                   COALESCE(p.target_platform,'') AS profile_platform,
-                   j.title, j.keywords,
-                   j.brief, j.data_sources, j.content_type, j.generated_content, j.status,
-                   TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                   TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
-            FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id
-            WHERE j.id=:id
-            """
-        ), {"id": job_id}).fetchone()
-    if not row:
-        raise HTTPException(404, "job not found")
-    return {"job": format_job(row)}
-
-@app.delete("/ai/jobs/{job_id}")
-def ai_job_delete(req: Request, job_id: int):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        res = conn.execute(text("DELETE FROM ai_content_jobs WHERE id=:id"), {"id": job_id})
-    if res.rowcount == 0:
-        raise HTTPException(404, "job not found")
-    audit(email, "ai:job:delete", {"job_id": job_id})
-    return {"ok": True}
-
-
-@app.get("/ai/schedule")
-def ai_schedule_list(
-    req: Request,
-    status: Optional[str] = Query(None),
-    job_id: Optional[int] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-):
-    _uid, email, role = require_user(req)
-    base_sql = (
-        "SELECT s.id, s.job_id, s.platform, s.publish_at, s.status, s.delivery_meta, "
-        "TO_CHAR(s.created_at,'YYYY-MM-DD HH24:MI') AS created_at, "
-        "TO_CHAR(s.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at, "
-        "j.title AS job_title, COALESCE(p.name,'') AS profile_name "
-        "FROM ai_content_schedule s "
-        "LEFT JOIN ai_content_jobs j ON j.id=s.job_id "
-        "LEFT JOIN ai_content_profiles p ON p.id=j.profile_id"
-    )
-    params = {"limit": limit}
-    filters = []
-    if status:
-        filters.append("s.status=:status")
-        params["status"] = status
-    if job_id:
-        filters.append("s.job_id=:job_id")
-        params["job_id"] = job_id
-    if filters:
-        base_sql += " WHERE " + " AND ".join(filters)
-    base_sql += " ORDER BY s.publish_at ASC, s.id ASC LIMIT :limit"
-    with engine.begin() as conn:
-        rows = conn.execute(text(base_sql), params).fetchall()
-    return {"schedule": [format_schedule(r) for r in rows]}
-
-
-@app.post("/ai/schedule")
-def ai_schedule_create(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    try:
-        job_id = int(payload.get("job_id"))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "job_id required")
-    platform = (payload.get("platform") or "").strip()
-    if not platform:
-        raise HTTPException(400, "platform required")
-    publish_at = parse_publish_at(payload.get("publish_at", ""))
-    with engine.begin() as conn:
-        job_row = conn.execute(
-            text(
-                """
-                SELECT j.id, j.title, COALESCE(p.name,'') AS profile_name
-                FROM ai_content_jobs j
-                LEFT JOIN ai_content_profiles p ON p.id=j.profile_id
-                WHERE j.id=:id
-                """
-            ),
-            {"id": job_id},
-        ).fetchone()
-        if not job_row:
-            raise HTTPException(404, "job not found")
-        schedule_row = conn.execute(
-            text(
-                """
-                WITH inserted AS (
-                    INSERT INTO ai_content_schedule(job_id, platform, publish_at, status)
-                    VALUES (:job_id, :platform, :publish_at, 'pending')
-                    RETURNING id, job_id, platform, publish_at, status, delivery_meta,
-                              created_at, updated_at
-                )
-                SELECT i.id, i.job_id, i.platform, i.publish_at, i.status, i.delivery_meta,
-                       TO_CHAR(i.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                       TO_CHAR(i.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at,
-                       :job_title AS job_title,
-                       :profile_name AS profile_name
-                FROM inserted i
-                """
-            ),
-            {
-                "job_id": job_id,
-                "platform": platform,
-                "publish_at": publish_at,
-                "job_title": job_row.title,
-                "profile_name": job_row.profile_name,
-            },
-        ).fetchone()
-    schedule = format_schedule(schedule_row)
-    audit(
-        email,
-        "ai:schedule:create",
-        {
-            "schedule_id": schedule["id"],
-            "job_id": job_id,
-            "platform": platform,
-            "publish_at": schedule["publish_at"],
-        },
-    )
-    return {"schedule": schedule}
-
-
-@app.delete("/ai/schedule/{schedule_id}")
-def ai_schedule_cancel(req: Request, schedule_id: int):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        row = conn.execute(
-            text(
-                """
-                WITH updated AS (
-                    UPDATE ai_content_schedule
-                    SET status='canceled',
-                        delivery_meta = COALESCE(delivery_meta, '{}'::jsonb) || jsonb_build_object(
-                            'canceled_at', NOW(),
-                            'canceled_by', :email
-                        ),
-                        updated_at=NOW()
-                    WHERE id=:id AND status IN ('pending','queued')
-                    RETURNING id, job_id, platform, publish_at, status, delivery_meta,
-                              created_at, updated_at
-                )
-                SELECT u.id, u.job_id, u.platform, u.publish_at, u.status, u.delivery_meta,
-                       TO_CHAR(u.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                       TO_CHAR(u.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at,
-                       j.title AS job_title,
-                       COALESCE(p.name,'') AS profile_name
-                FROM updated u
-                LEFT JOIN ai_content_jobs j ON j.id=u.job_id
-                LEFT JOIN ai_content_profiles p ON p.id=j.profile_id
-                """
-            ),
-            {"id": schedule_id, "email": email},
-        ).fetchone()
-    if not row:
-        raise HTTPException(404, "schedule not found or already finalized")
-    schedule = format_schedule(row)
-    audit(
-        email,
-        "ai:schedule:cancel",
-        {
-            "schedule_id": schedule_id,
-            "job_id": schedule["job_id"],
-            "status": schedule["status"],
-        },
-    )
-    return {"schedule": schedule}
-
-
-@app.post("/ai/content")
-def ai_generate(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    try:
-        profile_id = int(payload.get("profile_id")) if payload.get("profile_id") else None
-    except (TypeError, ValueError):
-        raise HTTPException(400, "invalid profile id")
-    title = (payload.get("title") or "").strip()
-    if not title:
-        raise HTTPException(400, "title required")
-    content_type = (payload.get("content_type") or "social-post").strip() or "social-post"
-    keywords = payload.get("keywords")
-    if isinstance(keywords, list):
-        keywords = ", ".join([str(k).strip() for k in keywords if str(k).strip()])
-    else:
-        keywords = (keywords or "").strip()
-    brief = (payload.get("brief") or "").strip()
-    data_sources = (payload.get("data_sources") or "").strip()
-    extra = (payload.get("extra") or "").strip()
-    with engine.begin() as conn:
-        profile_row = None
-        if profile_id:
-            profile_row = conn.execute(text(
-                "SELECT id, name, tone, voice, target_platform, guidelines FROM ai_content_profiles WHERE id=:id"
-            ), {"id": profile_id}).fetchone()
-            if not profile_row:
-                raise HTTPException(404, "profile not found")
-        profile_dict = {
-            "tone": profile_row.tone if profile_row else payload.get("tone", ""),
-            "voice": profile_row.voice if profile_row else payload.get("voice", ""),
-            "target_platform": profile_row.target_platform if profile_row else payload.get("target_platform", ""),
-            "guidelines": profile_row.guidelines if profile_row else payload.get("guidelines", ""),
-            "name": profile_row.name if profile_row else payload.get("profile_label", ""),
-        }
-        inserted = conn.execute(text(
-            """
-            INSERT INTO ai_content_jobs(profile_id,title,keywords,brief,data_sources,content_type,status,created_by)
-            VALUES (:pid,:title,:keywords,:brief,:data_sources,:ctype,'pending',:uid)
-            RETURNING id
-            """
-        ), {
-            "pid": profile_id,
-            "title": title,
-            "keywords": keywords,
-            "brief": brief,
-            "data_sources": data_sources,
-            "ctype": content_type,
-            "uid": uid,
-        }).fetchone()
-        job_id = inserted.id
-    messages = build_ai_messages(profile_dict, title, content_type, keywords, brief, data_sources, extra)
-    try:
-        status, generated, note = ai_call(messages)
-    except HTTPException as he:
-        with engine.begin() as conn:
-            conn.execute(text(
-                "UPDATE ai_content_jobs SET status='error', generated_content=:msg, updated_at=NOW() WHERE id=:id"
-            ), {"id": job_id, "msg": f"Generation failed: {he.detail}"})
-        raise
+        raise HTTPException(400, detail="name is required")
+    tone = body.get("tone")
+    voice = body.get("voice")
+    target_platform = body.get("target_platform")
+    guidelines = body.get("guidelines")
+    now = datetime.utcnow()
     with engine.begin() as conn:
         conn.execute(text(
-            "UPDATE ai_content_jobs SET generated_content=:content, status=:status, updated_at=NOW() WHERE id=:id"
-        ), {"id": job_id, "content": generated, "status": status})
-        row = conn.execute(text(
             """
-            SELECT j.id, j.profile_id, COALESCE(p.name,'') AS profile_name,
-                   COALESCE(p.target_platform,'') AS profile_platform,
-                   j.title, j.keywords,
-                   j.brief, j.data_sources, j.content_type, j.generated_content, j.status,
-                   TO_CHAR(j.created_at,'YYYY-MM-DD HH24:MI') AS created_at,
-                   TO_CHAR(j.updated_at,'YYYY-MM-DD HH24:MI') AS updated_at
-            FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id
-            WHERE j.id=:id
-            """
-        ), {"id": job_id}).fetchone()
-    if not row:
-        raise HTTPException(500, "job retrieval failed")
-    audit(email, "ai:generate", {"job_id": job_id, "title": title, "profile": profile_dict.get("name")})
-    return {"job": format_job(row), "note": note}
-
-
-@app.get("/ai/schedule")
-def ai_schedule_list(req: Request, status: Optional[str] = Query(None)):
-    _uid, email, role = require_user(req)
-    where = ""
-    params = {}
-    if status:
-        normalized = status.strip().lower()
-        if normalized not in SCHEDULE_STATUSES:
-            raise HTTPException(400, "invalid status filter")
-        where = " WHERE s.status=:status"
-        params["status"] = normalized
-    sql = SCHEDULE_SELECT_BASE + where + " ORDER BY s.scheduled_for ASC, s.id ASC"
-    with engine.begin() as conn:
-        rows = conn.execute(text(sql), params).fetchall()
-    return {"schedules": [format_schedule(r) for r in rows]}
-
-
-@app.post("/ai/schedule")
-def ai_schedule_create(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    try:
-        job_id = int(payload.get("job_id"))
-    except (TypeError, ValueError):
-        raise HTTPException(400, "job_id required")
-    platform = (payload.get("platform") or "").strip()
-    if not platform:
-        raise HTTPException(400, "platform required")
-    scheduled_for_raw = (payload.get("scheduled_for") or "").strip()
-    scheduled_for = parse_schedule_time(scheduled_for_raw)
-    with engine.begin() as conn:
-        job_row = conn.execute(text("SELECT id FROM ai_content_jobs WHERE id=:id"), {"id": job_id}).fetchone()
-        if not job_row:
-            raise HTTPException(404, "job not found")
-        inserted = conn.execute(text(
-            """
-            INSERT INTO ai_content_schedules(job_id, platform, scheduled_for, status, created_by)
-            VALUES (:job_id, :platform, :scheduled_for, 'scheduled', :created_by)
-            RETURNING id
+            INSERT INTO ai_content_profiles(name, tone, voice, target_platform, guidelines, updated_at)
+            VALUES (:name, :tone, :voice, :target_platform, :guidelines, :updated_at)
             """
         ), {
-            "job_id": job_id,
-            "platform": platform,
-            "scheduled_for": scheduled_for,
-            "created_by": uid,
-        }).fetchone()
-        schedule_row = fetch_schedule(conn, inserted.id)
-    if not schedule_row:
-        raise HTTPException(500, "schedule create failed")
-    audit(email, "ai:schedule:create", {"job_id": job_id, "schedule_id": schedule_row.id, "platform": platform})
-    return {"schedule": format_schedule(schedule_row)}
-
-
-@app.put("/ai/schedule/{schedule_id}")
-def ai_schedule_update(req: Request, schedule_id: int, payload: dict):
-    uid, email, role = require_user(req)
-    platform_raw = payload.get("platform") if isinstance(payload, dict) else None
-    scheduled_for_raw = payload.get("scheduled_for") if isinstance(payload, dict) else None
-    updates = []
-    params = {"id": schedule_id}
-    with engine.begin() as conn:
-        existing = conn.execute(text("SELECT status FROM ai_content_schedules WHERE id=:id"), {"id": schedule_id}).fetchone()
-        if not existing:
-            raise HTTPException(404, "schedule not found")
-        new_status = existing.status
-        if platform_raw is not None:
-            platform = platform_raw.strip()
-            if not platform:
-                raise HTTPException(400, "platform cannot be empty")
-            updates.append("platform=:platform")
-            params["platform"] = platform
-        if scheduled_for_raw is not None:
-            parsed_time = parse_schedule_time(str(scheduled_for_raw))
-            updates.append("scheduled_for=:scheduled_for")
-            params["scheduled_for"] = parsed_time
-            new_status = "scheduled"
-        if new_status != existing.status:
-            updates.append("status=:status")
-            params["status"] = new_status
-        if not updates:
-            raise HTTPException(400, "no changes provided")
-        updates.append("updated_at=NOW()")
-        sql = "UPDATE ai_content_schedules SET " + ", ".join(updates) + " WHERE id=:id"
-        res = conn.execute(text(sql), params)
-        if res.rowcount == 0:
-            raise HTTPException(404, "schedule not found")
-        schedule_row = fetch_schedule(conn, schedule_id)
-    audit(email, "ai:schedule:update", {"schedule_id": schedule_id})
-    return {"schedule": format_schedule(schedule_row)}
-
-
-@app.post("/ai/schedule/{schedule_id}/cancel")
-def ai_schedule_cancel(req: Request, schedule_id: int):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        res = conn.execute(text(
-            "UPDATE ai_content_schedules SET status='canceled', updated_at=NOW() WHERE id=:id"
-        ), {"id": schedule_id})
-        if res.rowcount == 0:
-            raise HTTPException(404, "schedule not found")
-        schedule_row = fetch_schedule(conn, schedule_id)
-    audit(email, "ai:schedule:cancel", {"schedule_id": schedule_id})
-    return {"schedule": format_schedule(schedule_row)}
-
-
-@app.post("/ai/schedule/{schedule_id}/retry")
-def ai_schedule_retry(req: Request, schedule_id: int):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        res = conn.execute(text(
-            """
-            UPDATE ai_content_schedules
-            SET status='scheduled', last_attempted_at=NULL, updated_at=NOW()
-            WHERE id=:id
-            """
-        ), {"id": schedule_id})
-        if res.rowcount == 0:
-            raise HTTPException(404, "schedule not found")
-        schedule_row = fetch_schedule(conn, schedule_id)
-    audit(email, "ai:schedule:retry", {"schedule_id": schedule_id})
-    return {"schedule": format_schedule(schedule_row)}
-
-# ---------- Proxmox helpers ----------
-def pve_headers():
-    return {"Authorization": f"PVEAPIToken={PVE_TOKEN_ID}={PVE_TOKEN_SECRET}"}
-
-async def pve_get(path: str):
-    async with httpx.AsyncClient(verify=False, timeout=18) as c:
-        r = await c.get(f"{PVE_HOST}/api2/json{path}", headers=pve_headers())
-        r.raise_for_status()
-        return r.json()["data"]
-
-async def pve_post(path: str, data=None):
-    async with httpx.AsyncClient(verify=False, timeout=30) as c:
-        r = await c.post(f"{PVE_HOST}/api2/json{path}", headers=pve_headers(), data=data or {})
-        r.raise_for_status()
-        return r.json().get("data")
-
-async def pve_put(path: str, data=None):
-    async with httpx.AsyncClient(verify=False, timeout=30) as c:
-        r = await c.put(f"{PVE_HOST}/api2/json{path}", headers=pve_headers(), data=data or {})
-        r.raise_for_status()
-        return r.json().get("data")
-
-async def pve_delete(path: str):
-    async with httpx.AsyncClient(verify=False, timeout=30) as c:
-        r = await c.delete(f"{PVE_HOST}/api2/json{path}", headers=pve_headers())
-        r.raise_for_status()
-        return r.json().get("data")
-
-def filter_vms_for_user(vms: List[dict], uid: int, role: str):
-    with engine.begin() as conn:
-        perm_count = conn.execute(text("SELECT COUNT(1) FROM vm_permissions")).scalar()
-        if role == "leader" or perm_count == 0:
-            return vms, { (v['node'], int(v['vmid'])): {"can_power": True, "can_snapshot": (role=='leader')} for v in vms }
-        rows = conn.execute(text("""
-            SELECT node, vmid, can_power, can_snapshot
-            FROM vm_permissions WHERE user_id=:uid
-        """), {"uid": uid}).fetchall()
-    allowed = { (r.node, int(r.vmid)): {"can_power": r.can_power, "can_snapshot": r.can_snapshot} for r in rows }
-    vms_f = []
-    for v in vms:
-        key = (v["node"], int(v["vmid"]))
-        if key in allowed:
-            vms_f.append(v)
-    return vms_f, allowed
-
-# ---------- Services list ----------
-@app.get("/ui/services", response_class=HTMLResponse)
-async def ui_services(req: Request):
-    uid, email, role = require_user(req)
-    vms = []
-    try:
-        nodes = await pve_get("/nodes")
-        for n in nodes:
-            for v in await pve_get(f"/nodes/{n['node']}/qemu"):
-                vms.append({"type":"qemu","node":n["node"], **v})
-            for v in await pve_get(f"/nodes/{n['node']}/lxc"):
-                vms.append({"type":"lxc","node":n["node"], **v})
-    except Exception as e:
-        print("[PVE] list error:", e, file=sys.stderr)
-    vms, perms = filter_vms_for_user(vms, uid, role)
-    cust_map = {}
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT vm.node, vm.vmid, c.name
-            FROM vm_customers vm JOIN customers c ON vm.customer_id=c.id
-        """)).fetchall()
-    for r in rows:
-        cust_map[(r.node, int(r.vmid))] = r.name
-    return render("services.html", vms=vms, perms=perms, host=PVE_HOST, role=role, email=email, cust_map=cust_map)
-
-@app.get("/ui/proxmox-summary", response_class=HTMLResponse)
-async def ui_pve_summary(req: Request):
-    uid, email, role = require_user(req)
-    nodes = []; guests = []
-    try:
-        nodes = await pve_get("/nodes")
-        for n in nodes:
-            gs = await pve_get(f"/nodes/{n['node']}/qemu")
-            cs = await pve_get(f"/nodes/{n['node']}/lxc")
-            for g in gs + cs:
-                g["node"] = n["node"]
-                guests.append(g)
-    except Exception as e:
-        print("[PVE] summary error:", e, file=sys.stderr)
-    return render("pve_summary.html", nodes=nodes, guests=guests, host=PVE_HOST)
-
-@app.get("/ui/proxmox-vms", response_class=HTMLResponse)
-async def legacy_vms(req: Request): return await ui_services(req)
-
-# ---------- Live selectors ----------
-@app.get("/api/pve/nodes")
-async def api_nodes(req: Request):
-    _ = require_user(req); return await pve_get("/nodes")
-
-@app.get("/api/pve/{node}/bridges")
-async def api_bridges(req: Request, node: str):
-    _ = require_user(req)
-    nets = await pve_get(f"/nodes/{node}/network")
-    return [n for n in nets if n.get("type")=="bridge" and n.get("active")==1]
-
-@app.get("/api/pve/{node}/storages")
-async def api_storages(req: Request, node: str):
-    _ = require_user(req); return await pve_get(f"/nodes/{node}/storage")
-
-@app.get("/api/pve/{node}/storage/{store}/content")
-async def api_storage_content(req: Request, node: str, store: str, content: str = Query("iso")):
-    _ = require_user(req)
-    items = await pve_get(f"/nodes/{node}/storage/{store}/content")
-    return [i for i in items if i.get("content")==content]
-
-@app.get("/api/pve/nextid")
-async def api_nextid(req: Request):
-    _ = require_user(req); return {"vmid": await pve_get("/cluster/nextid")}
-
-# ---------- QEMU: Create / View / Edit / Clone / Snapshots ----------
-@app.get("/ui/vm/{node}/{vmid}", response_class=HTMLResponse)
-async def ui_vm_detail(req: Request, node: str, vmid: int):
-    _uid, email, role = require_user(req)
-    try:
-        cfg = await pve_get(f"/nodes/{node}/qemu/{vmid}/config")
-        status = await pve_get(f"/nodes/{node}/qemu/{vmid}/status/current")
-        snaps = await pve_get(f"/nodes/{node}/qemu/{vmid}/snapshot")
-    except Exception as e:
-        return HTMLResponse(f"<pre>VM not found or no permission\n{e}</pre>", status_code=404)
-    return render("vm_detail.html", node=node, vmid=vmid, cfg=cfg, status=status, snaps=snaps, host=PVE_HOST, role=role)
-
-@app.get("/ui/vm/{node}/{vmid}/edit", response_class=HTMLResponse)
-async def ui_vm_edit(req: Request, node: str, vmid: int):
-    _uid, email, role = require_user(req)
-    cfg = await pve_get(f"/nodes/{node}/qemu/{vmid}/config")
-    return render("vm_edit.html", node=node, vmid=vmid, cfg=cfg)
-
-@app.post("/api/pve/qemu/{node}/{vmid}/config")
-async def api_vm_config(req: Request, node: str, vmid: int, payload: dict):
-    uid, email, role = require_user(req)
-    name = payload.get("name")
-    memory = int(payload.get("memory") or 0)
-    cores = int(payload.get("cores") or 0)
-    data = {}
-    if name: data["name"] = name
-    if memory: data["memory"] = memory
-    if cores: data["cores"] = cores
-    if payload.get("description") is not None:
-        data["description"] = payload["description"]
-    if not data: raise HTTPException(400, "no changes")
-    await pve_post(f"/nodes/{node}/qemu/{vmid}/config", data)
-    audit(email, "pve:config", {"node":node,"vmid":vmid,"changes":data})
+            "name": name, "tone": tone, "voice": voice,
+            "target_platform": target_platform, "guidelines": guidelines,
+            "updated_at": now,
+        })
     return {"ok": True}
 
-@app.post("/api/pve/qemu/create")
-async def api_vm_create(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    if role != "leader": raise HTTPException(403, "leader only")
-    node = payload["node"]; name = payload["name"]
-    vmid = int(payload.get("vmid") or (await pve_get("/cluster/nextid")))
-    memory = int(payload.get("memory") or 2048); cores = int(payload.get("cores") or 2)
-    storage = payload.get("storage","local-lvm"); disk_gb = int(payload.get("disk_gb") or 20)
-    bridge = payload.get("bridge","vmbr0"); iso = payload.get("iso","")
-    cloudinit = bool(payload.get("cloudinit", False))
-    ciuser = payload.get("ciuser","ubuntu"); cipass = payload.get("cipassword","")
-    sshkeys = payload.get("sshkeys",""); ipconfig0 = payload.get("ipconfig0","")
-    net0 = f"virtio,bridge={bridge}"
-    scsi0 = f"{storage}:{disk_gb}"
-    post_data = {"vmid": vmid, "name": name, "memory": memory, "cores": cores,
-                 "net0": net0, "scsi0": scsi0, "ostype":"l26","scsihw":"virtio-scsi-pci","agent":1}
-    if iso:
-        post_data["ide2"] = iso + ",media=cdrom"; post_data["boot"] = "order=ide2;scsi0;net0"
-    if cloudinit:
-        post_data["ide2"] = "local:cloudinit"
-        if ciuser: post_data["ciuser"] = ciuser
-        if cipass: post_data["cipassword"] = cipass
-        if sshkeys: post_data["sshkeys"] = sshkeys
-        if ipconfig0: post_data["ipconfig0"] = ipconfig0
-        post_data["boot"] = "order=scsi0;ide2;net0"
-    await pve_post(f"/nodes/{node}/qemu", post_data)
-    audit(email, "pve:create", {"node":node,"vmid":vmid,"name":name})
-    return {"ok": True, "vmid": vmid}
-
-@app.post("/api/pve/qemu/create/crew")
-async def api_vm_create_crew(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    if role != "leader":
-        raise HTTPException(403, "leader only")
-    vmid = int(payload.get("vmid") or (await pve_get("/cluster/nextid")))
-    name = payload.get("name", "crew-software")
-    try:
-        node = payload.get("node")
-        if not node:
-            nodes = await pve_get("/nodes")
-            if not nodes:
-                raise HTTPException(400, "no proxmox nodes available")
-            node = nodes[0]["node"]
-        storage = payload.get("storage", "local-lvm")
-        bridge = payload.get("bridge", "vmbr0")
-        memory = int(payload.get("memory") or 4096)
-        cores = int(payload.get("cores") or 4)
-        disk_gb = int(payload.get("disk_gb") or 60)
-        ip_cidr = payload.get("ip", "192.168.1.20/24")
-        gateway = payload.get("gateway", "192.168.1.1")
-        ciuser = payload.get("ciuser", "crew")
-        cipassword = payload.get("cipassword", "")
-        sshkeys = payload.get("sshkeys", "")
-        ipconfig0 = payload.get("ipconfig0") or f"ip={ip_cidr},gw={gateway}"
-    except ValueError:
-        raise HTTPException(400, "invalid numeric value")
-    post_data = {
-        "vmid": vmid,
-        "name": name,
-        "memory": memory,
-        "cores": cores,
-        "scsihw": "virtio-scsi-pci",
-        "ostype": "l26",
-        "agent": 1,
-        "net0": f"virtio,bridge={bridge}",
-        "scsi0": f"{storage}:{disk_gb}",
-        "ide2": "local:cloudinit",
-        "boot": "order=scsi0;ide2;net0",
-        "ciuser": ciuser,
-        "ipconfig0": ipconfig0,
-    }
-    if cipassword:
-        post_data["cipassword"] = cipassword
-    if sshkeys:
-        post_data["sshkeys"] = sshkeys
-    try:
-        await pve_post(f"/nodes/{node}/qemu", post_data)
-    except httpx.HTTPError as e:
-        raise HTTPException(502, f"pve error: {e}")
-    audit(email, "pve:create_crew", {
-        "node": node,
-        "vmid": vmid,
-        "name": name,
-        "ip": ipconfig0,
-    })
-    return {"ok": True, "vmid": vmid}
-
-@app.post("/api/pve/qemu/{node}/{vmid}/clone")
-async def api_vm_clone(req: Request, node: str, vmid: int, payload: dict):
-    uid, email, role = require_user(req)
-    if role != "leader": raise HTTPException(403, "leader only")
-    newid = int(payload.get("newid") or (await pve_get("/cluster/nextid")))
-    name = payload.get("name") or f"clone-{vmid}-{newid}"
-    target = payload.get("target", node)
-    storage = payload.get("storage", "local-lvm")
-    full = int(bool(payload.get("full", True)))
-    data = {"newid": newid, "name": name, "target": target, "storage": storage, "full": full}
-    await pve_post(f"/nodes/{node}/qemu/{vmid}/clone", data)
-    audit(email, "pve:clone", {"node":node,"vmid":vmid,"newid":newid,"name":name})
-    return {"ok": True, "vmid": newid}
-
-@app.get("/api/pve/qemu/{node}/{vmid}/snapshots")
-async def api_vm_snaps(req: Request, node: str, vmid: int):
-    _ = require_user(req); return await pve_get(f"/nodes/{node}/qemu/{vmid}/snapshot")
-
-@app.post("/api/pve/qemu/{node}/{vmid}/snapshot")
-async def api_vm_snapshot(req: Request, node: str, vmid: int, payload: dict):
-    uid, email, role = require_user(req)
-    name = payload.get("name") or f"dash_{int(time.time())}"
-    await pve_post(f"/nodes/{node}/qemu/{vmid}/snapshot", {"snapname": name})
-    audit(email, "pve:snapshot", {"node":node,"vmid":vmid,"name":name})
-    return {"ok": True}
-
-@app.post("/api/pve/qemu/{node}/{vmid}/snapshot/{name}/rollback")
-async def api_vm_snap_rollback(req: Request, node: str, vmid: int, name: str):
-    uid, email, role = require_user(req)
-    await pve_post(f"/nodes/{node}/qemu/{vmid}/snapshot/{name}/rollback")
-    audit(email, "pve:rollback", {"node":node,"vmid":vmid,"name":name})
-    return {"ok": True}
-
-@app.delete("/api/pve/qemu/{node}/{vmid}/snapshot/{name}")
-async def api_vm_snap_delete(req: Request, node: str, vmid: int, name: str):
-    uid, email, role = require_user(req)
-    await pve_delete(f"/nodes/{node}/qemu/{vmid}/snapshot/{name}")
-    audit(email, "pve:snap_delete", {"node":node,"vmid":vmid,"name":name})
-    return {"ok": True}
-
-# ---------- LXC Create ----------
-@app.post("/api/pve/lxc/create")
-async def api_lxc_create(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    if role != "leader": raise HTTPException(403, "leader only")
-    node = payload["node"]; hostname = payload["hostname"]
-    vmid = int(payload.get("vmid") or (await pve_get("/cluster/nextid")))
-    password = payload.get("password",""); storage = payload.get("storage","local-lvm")
-    rootfs = f"{storage}:{int(payload.get('disk_gb',8))}"
-    template = payload.get("template")
-    bridge = payload.get("bridge","vmbr0"); ip = payload.get("ip","dhcp")
-    data = {"vmid": vmid, "hostname": hostname, "password": password, "rootfs": rootfs,
-            "ostemplate": template, "net0": f"name=eth0,bridge={bridge},ip={ip}", "memory": int(payload.get("memory",1024))}
-    await pve_post(f"/nodes/{node}/lxc", data)
-    audit(email, "pve:lxc_create", {"node":node,"vmid":vmid,"hostname":hostname})
-    return {"ok": True, "vmid": vmid}
-
-# ---------- Power ----------
-@app.post("/api/pve/{kind}/{node}/{vmid}/{action}")
-async def pve_action(req: Request, kind: str, node: str, vmid: int, action: str):
-    uid, email, role = require_user(req)
-    allowed_actions = {"start","stop","shutdown","reset","reboot","resume","suspend","snapshot"}
-    if action not in allowed_actions: raise HTTPException(400,"bad action")
-    can_power = True; can_snap = (role == "leader")
+@app.delete("/ai/profiles/{pid}")
+async def api_profiles_delete(pid: int):
     with engine.begin() as conn:
-        perm_count = conn.execute(text("SELECT COUNT(1) FROM vm_permissions")).scalar()
-        if role != "leader" and perm_count > 0:
-            row = conn.execute(text("""
-                SELECT can_power, can_snapshot FROM vm_permissions
-                WHERE user_id=:uid AND node=:node AND vmid=:vmid
-            """), {"uid": uid, "node": node, "vmid": vmid}).fetchone()
-            if not row: raise HTTPException(403, "no permission")
-            can_power, can_snap = row.can_power, row.can_snapshot
-    path_base = f"/nodes/{node}/{ 'qemu' if kind=='qemu' else 'lxc' }/{vmid}"
-    if action=="snapshot":
-        if not can_snap: raise HTTPException(403, "no snapshot permission")
-        snapname = f"dash_{int(time.time())}"
-        await pve_post(f"{path_base}/snapshot", {"snapname": snapname})
+        conn.execute(text("DELETE FROM ai_content_profiles WHERE id=:id"), {"id": pid})
+    return {"ok": True}
+
+# ---------- Content Generation ----------
+def _build_prompt_from_profile(conn, profile_id: Optional[int], body: Dict[str, Any]) -> Tuple[str, str]:
+    system = "You are a content generation assistant."
+    user = body.get("brief") or ""
+    if profile_id:
+        row = conn.execute(text("SELECT * FROM ai_content_profiles WHERE id=:id"), {"id": profile_id}).mappings().first()
+        if row:
+            parts = [
+                f"Tone: {row.get('tone') or ''}",
+                f"Voice: {row.get('voice') or ''}",
+                f"Primary platforms: {row.get('target_platform') or ''}",
+                f"Guidelines: {row.get('guidelines') or ''}",
+            ]
+            system = "You write on-brand content.\n" + "\n".join(parts)
+    title = body.get("title") or ""
+    keywords = body.get("keywords") or ""
+    extra = body.get("extra") or ""
+    user = f"Title: {title}\nKeywords: {keywords}\nBrief: {body.get('brief') or ''}\nExtra: {extra}"
+    return system, user
+
+def _fallback_generate(body: Dict[str, Any]) -> str:
+    title = body.get('title') or 'Untitled'
+    ctype = (body.get('content_type') or 'custom').lower()
+    keywords = body.get('keywords') or '-'
+    brief = (body.get('brief') or '').strip()
+    extra = (body.get('extra') or '').strip()
+    if ctype == 'social-post':
+        kw = [k.strip() for k in str(keywords).split(',') if k.strip()]
+        tag = (kw[0] if kw else 'content').lower()
+        content = [
+            f"# {title}",
+            f"Keywords: {keywords}",
+            "",
+            "Post 1:",
+            f"- Hook: {title} — you won't believe this {tag} twist.",
+            f"- Body: Quick hit: what happened, why it matters, and the hidden detail everyone misses.",
+            f"- CTA: Follow for more {tag} drops like this.",
+            "",
+            "Post 2:",
+            f"- Hook: The moment that changed everything in {title}.",
+            f"- Body: Set the scene, deliver the surprise, then land the takeaway.",
+            f"- CTA: Share with a friend who needs this.",
+            "",
+            "Post 3:",
+            f"- Hook: If you missed {title}, here's the 15s recap.",
+            f"- Body: Three beats: setup · twist · payoff. Simple and tight.",
+            f"- CTA: Save this so you don't forget.",
+        ]
+    elif ctype == 'reddit-story':
+        kw = [k.strip() for k in str(keywords).split(',') if k.strip()]
+        tag = (kw[0] if kw else 'story').lower()
+        content = [
+            f"# {title}",
+            f"Keywords: {keywords}",
+            "",
+            "Intro:",
+            f"Last night I was deep in {tag} mode when something felt off. Not the usual kind of off, either.",
+            "",
+            "The twist:",
+            f"Halfway in, a tiny detail changed the entire vibe. I paused, rewound, and realized what I missed.",
+            "",
+            "Build-up:",
+            "I started connecting dots — the noise, the timing, the way the room felt colder than it should.",
+            "",
+            "Climax:",
+            f"Suddenly, it clicked. The whole {title} moment wasn’t random — it was building to this.",
+            "",
+            "Aftermath:",
+            "I saved the clip, turned the lights back on, and laughed at how hard I got baited.",
+            "",
+            "CTA:",
+            "Tell me the exact second you realized something was wrong — I bet it’s not where you think.",
+        ]
+    elif ctype == 'video-script':
+        content = [
+            f"# {title}",
+            f"Keywords: {keywords}",
+            "",
+            "0-2s: Cold open — smash cut to the most surprising moment.",
+            f"2-7s: Hook — '{title}' in one line, with a visual tease.",
+            "7-20s: Setup — where we were, what we expected, and what changed.",
+            "20-45s: The twist — tight cuts, punchy lines, build tension.",
+            "45-55s: Payoff — the reveal and why it matters.",
+            "55-60s: CTA — follow for part 2 or comment your take.",
+        ]
     else:
-        if not can_power: raise HTTPException(403, "no power permission")
-        await pve_post(f"{path_base}/status/{action}")
-    audit(email, f"pve:{action}", {"kind":kind,"node":node,"vmid":vmid})
+        content = [
+            f"# {title}",
+            f"Type: {ctype}",
+            f"Keywords: {keywords}",
+            "",
+            "Draft outline:",
+            "- Hook",
+            "- Body",
+            "- CTA",
+        ]
+    if brief:
+        content.append("")
+        content.append("Brief:")
+        content.append(brief)
+    if extra:
+        content.append("")
+        content.append("Operator notes:")
+        content.append(extra)
+    return "\n".join(content)
+
+@app.post("/ai/content")
+async def api_content(body: Dict[str, Any]):
+    profile_id = body.get("profile_id")
+    content_type = body.get("content_type") or "custom"
+    title = body.get("title") or "Untitled"
+    now = datetime.utcnow()
+    with engine.begin() as conn:
+        # Build prompt
+        system, user = _build_prompt_from_profile(conn, int(profile_id) if profile_id else None, body)
+    try:
+        messages = build_ai_messages(system, user)
+        ai_resp = await ai_call(messages)
+        generated = ai_resp.get("choices", [{}])[0].get("message", {}).get("content") if isinstance(ai_resp, dict) else None
+        if not generated:
+            generated = _fallback_generate(body)
+        note = "AI generated"
+    except HTTPException:
+        generated = _fallback_generate(body)
+        note = "AI disabled — used fallback template"
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            INSERT INTO ai_content_jobs(profile_id, title, keywords, content_type, brief, data_sources, extra, generated_content, status, created_at, updated_at)
+            VALUES (:profile_id, :title, :keywords, :content_type, :brief, :data_sources, :extra, :generated_content, 'completed', :created_at, :updated_at)
+            """
+        ), {
+            "profile_id": int(profile_id) if profile_id else None,
+            "title": title,
+            "keywords": body.get("keywords"),
+            "content_type": content_type,
+            "brief": body.get("brief"),
+            "data_sources": body.get("data_sources"),
+            "extra": body.get("extra"),
+            "generated_content": generated,
+            "created_at": now,
+            "updated_at": now,
+        })
+        row = conn.execute(text("SELECT last_insert_rowid() as id" if str(engine.url).lower().startswith("sqlite") else "SELECT currval(pg_get_serial_sequence('ai_content_jobs','id')) as id")).mappings().first()
+        job_id = int(row["id"]) if row else None
+    return {"job": {
+        "id": job_id,
+        "title": title,
+        "content_type": content_type,
+        "generated_content": generated,
+        "status": "completed",
+    }, "note": note}
+
+@app.get("/ai/jobs")
+async def api_jobs_list():
+    is_sqlite = str(engine.url).lower().startswith("sqlite")
+    with engine.begin() as conn:
+        if is_sqlite:
+            sql = (
+                "SELECT j.*, p.name AS profile_name, p.target_platform AS profile_platform "
+                "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id "
+                "ORDER BY COALESCE(j.updated_at, j.created_at) DESC, j.id DESC LIMIT 50"
+            )
+        else:
+            sql = (
+                "SELECT j.*, p.name AS profile_name, p.target_platform AS profile_platform "
+                "FROM ai_content_jobs j LEFT JOIN ai_content_profiles p ON p.id=j.profile_id "
+                "ORDER BY COALESCE(j.updated_at, j.created_at) DESC, j.id DESC LIMIT 50"
+            )
+        rows = conn.execute(text(sql)).mappings().all()
+    # add simple ISO times
+    out = []
+    for r in rows:
+        d = dict(r)
+        if d.get("created_at"):
+            d["created_at"] = str(d["created_at"])
+        if d.get("updated_at"):
+            d["updated_at"] = str(d["updated_at"])
+        out.append(d)
+    return {"jobs": out}
+
+# ---------- Scheduling ----------
+def _schedule_row_to_dto(row: Dict[str, Any]) -> Dict[str, Any]:
+    d = dict(row)
+    if d.get("scheduled_for"):
+        # normalize to ISO string for UI
+        try:
+            d["scheduled_for_iso"] = d["scheduled_for"].isoformat() if hasattr(d["scheduled_for"], "isoformat") else str(d["scheduled_for"])
+        except Exception:
+            d["scheduled_for_iso"] = str(d["scheduled_for"])
+    return d
+
+@app.get("/ai/schedule")
+async def api_schedule_list():
+    with engine.begin() as conn:
+        rows = conn.execute(text(
+            """
+            SELECT s.*, j.title AS job_title, p.name AS job_profile_name, j.content_type AS job_content_type
+            FROM ai_content_schedules s
+            LEFT JOIN ai_content_jobs j ON j.id = s.job_id
+            LEFT JOIN ai_content_profiles p ON p.id = j.profile_id
+            ORDER BY COALESCE(s.updated_at, s.created_at) DESC, s.id DESC
+            """
+        )).mappings().all()
+    return {"schedules": [_schedule_row_to_dto(r) for r in rows]}
+
+@app.post("/ai/schedule")
+async def api_schedule_create(body: Dict[str, Any]):
+    job_id = body.get("job_id")
+    platform = (body.get("platform") or "").strip()
+    when = parse_schedule_time(body.get("scheduled_for"))
+    if not job_id or not platform:
+        raise HTTPException(400, detail="job_id and platform are required")
+    now = datetime.utcnow()
+    with engine.begin() as conn:
+        conn.execute(text(
+            """
+            INSERT INTO ai_content_schedules(job_id, platform, scheduled_for, status, created_at, updated_at)
+            VALUES (:job_id, :platform, :when, 'scheduled', :created_at, :updated_at)
+            """
+        ), {"job_id": int(job_id), "platform": platform, "when": when, "created_at": now, "updated_at": now})
     return {"ok": True}
 
-# ---------- Cloud-init Profiles ----------
-@app.get("/ui/profiles", response_class=HTMLResponse)
-def ui_profiles(req: Request):
-    uid, email, role = require_user(req)
+@app.put("/ai/schedule/{sid}")
+async def api_schedule_update(sid: int, body: Dict[str, Any]):
+    platform = (body.get("platform") or "").strip()
+    when = parse_schedule_time(body.get("scheduled_for"))
+    now = datetime.utcnow()
     with engine.begin() as conn:
-        rows = conn.execute(text("SELECT id,name,ciuser,cipassword,sshkeys,ipconfig0 FROM ci_profiles ORDER BY id DESC")).fetchall()
-    return render("profiles.html", rows=rows, role=role)
-
-@app.post("/api/profiles")
-def create_profile(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    if role != "leader": raise HTTPException(403,"leader only")
-    with engine.begin() as conn:
-        conn.execute(text("""
-            INSERT INTO ci_profiles(name,ciuser,cipassword,sshkeys,ipconfig0)
-            VALUES (:n,:u,:p,:k,:i)
-        """), {"n":payload["name"], "u":payload.get("ciuser","ubuntu"),
-               "p":payload.get("cipassword",""), "k":payload.get("sshkeys",""),
-               "i":payload.get("ipconfig0","")})
-    audit(email, "ci_profile:create", {"name":payload["name"]})
+        conn.execute(text(
+            "UPDATE ai_content_schedules SET platform=:platform, scheduled_for=:when, updated_at=:now WHERE id=:id"
+        ), {"platform": platform, "when": when, "now": now, "id": sid})
     return {"ok": True}
 
-@app.delete("/api/profiles/{pid}")
-def delete_profile(req: Request, pid: int):
-    uid, email, role = require_user(req)
-    if role != "leader": raise HTTPException(403,"leader only")
+@app.post("/ai/schedule/{sid}/cancel")
+async def api_schedule_cancel(sid: int):
+    now = datetime.utcnow()
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM ci_profiles WHERE id=:id"), {"id": pid})
-    audit(email, "ci_profile:delete", {"id":pid})
+        conn.execute(text("UPDATE ai_content_schedules SET status='canceled', updated_at=:now WHERE id=:id"), {"now": now, "id": sid})
     return {"ok": True}
 
-# ---------- Customers & VM mapping ----------
-@app.get("/ui/customers", response_class=HTMLResponse)
-def ui_customers(req: Request):
-    uid, email, role = require_user(req)
+@app.post("/ai/schedule/{sid}/retry")
+async def api_schedule_retry(sid: int):
+    now = datetime.utcnow()
     with engine.begin() as conn:
-        cs = conn.execute(text("SELECT id,name,contact,notes FROM customers ORDER BY name")).fetchall()
-        maps = conn.execute(text("""
-            SELECT vm.node, vm.vmid, c.name
-            FROM vm_customers vm JOIN customers c ON vm.customer_id=c.id
-        """)).fetchall()
-    return render("customers.html", customers=cs, maps=maps)
-
-@app.post("/api/customers")
-def create_customer(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        conn.execute(text("INSERT INTO customers(name,contact,notes) VALUES (:n,:c,:o)"),
-                     {"n":payload["name"], "c":payload.get("contact",""), "o":payload.get("notes","")})
-    audit(email, "customer:create", {"name":payload["name"]})
+        conn.execute(text(
+            "UPDATE ai_content_schedules SET status='scheduled', result=NULL, updated_at=:now WHERE id=:id"
+        ), {"now": now, "id": sid})
     return {"ok": True}
 
-@app.post("/api/customers/map")
-def map_vm(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    node = payload["node"]; vmid = int(payload["vmid"])
-    cust = payload["customer"]
+# Minimal endpoint to dry-run publisher payload
+@app.post("/publish/{publisher_name}/dry_run")
+async def publish_dry_run(publisher_name: str, job: Dict[str, Any]):
+    publisher = get_publisher(publisher_name)
+    if not publisher:
+        raise HTTPException(status_code=404, detail="publisher not found")
+    health = publisher.health_check()
+    ok = bool(health.get("success") if isinstance(health, dict) else False)
+    if not ok:
+        raise HTTPException(status_code=400, detail="publisher not healthy")
+    payload = job
+    if hasattr(publisher, "prepare_payload"):
+        try:
+            payload = publisher.prepare_payload(job)
+        except Exception:
+            payload = job
+    return {"publisher": publisher_name, "dry_run_payload": payload}
+
+
+# ---------- Video generation ----------
+def _ensure_text(value: Optional[str], fallback: str = "") -> str:
+    return (value or fallback).strip()
+
+
+@app.post("/ai/video")
+async def api_generate_video(body: Dict[str, Any]):
+    """Generate a vertical short video from a job or raw text using fully local tools.
+
+    Accepts:
+      - job_id: int (fetches title and generated_content from ai_content_jobs)
+      - title: str
+      - script: str
+    Returns a JSON with video filename and a local URL under /media.
+    """
+    job_id = body.get("job_id")
+    title = _ensure_text(body.get("title"))
+    script = _ensure_text(body.get("script"))
+    if job_id and (not title or not script):
+        with engine.begin() as conn:
+            row = conn.execute(text("SELECT title, generated_content FROM ai_content_jobs WHERE id=:id"), {"id": int(job_id)}).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="job not found")
+            title = _ensure_text(title, row.get("title") or "Untitled")
+            script = _ensure_text(script, row.get("generated_content") or "")
+    if not title or not script:
+        raise HTTPException(status_code=400, detail="title and script are required (or provide job_id)")
+
+    # Optional parameters
+    background = (body.get("background") or body.get("background_name") or "").strip() or None
+    subtitles = bool(body.get("subtitles", True))
+    draw_title = bool(body.get("draw_title", True))
+    tts_rate = body.get("tts_rate")
+    tts_voice = body.get("tts_voice")
+    # Advanced options
+    min_duration_secs = body.get("min_duration") or body.get("min_duration_secs")
+    try:
+        min_duration_secs = int(min_duration_secs) if min_duration_secs is not None else None
+    except Exception:
+        min_duration_secs = None
+    music = bool(body.get("music", False))
+    ducking = bool(body.get("ducking", True))
+    music_volume = body.get("music_volume", 0.15)
+    try:
+        music_volume = float(music_volume)
+    except Exception:
+        music_volume = 0.15
+
+    # Generate locally using media module
+    try:
+        meta = media_mod.generate_short(
+            title=title,
+            script=script,
+            background_name=background,
+            subtitles=subtitles,
+            draw_title=draw_title,
+            tts_rate=tts_rate,
+            tts_voice=tts_voice,
+            min_duration_secs=min_duration_secs,
+            music=music,
+            music_volume=music_volume,
+            ducking=ducking,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"video generation failed: {e}")
+    filename = meta.get("filename")
+    url = f"/media/{filename}"
+    return {"video": {"filename": filename, "url": url}, "meta": meta}
+
+
+@app.get("/media/raw/{filename}")
+async def media_raw(filename: str):
+    """Serve raw media file by filename from MEDIA_DIR."""
+    path = media_mod.MEDIA_DIR / filename
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    return FileResponse(path)
+
+
+@app.get("/ai/video/backgrounds")
+async def list_backgrounds():
+    try:
+        items = media_mod.list_backgrounds()
+        return {"backgrounds": items}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/ai/video/backgrounds/seed")
+async def seed_backgrounds():
+    try:
+        return media_mod.seed_backgrounds()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/ai/voices")
+async def list_voices():
+    import shutil, subprocess
+    try:
+        import pyttsx3
+        try:
+            engine = pyttsx3.init()
+            out = []
+            for v in engine.getProperty("voices") or []:
+                out.append({
+                    "id": getattr(v, 'id', None),
+                    "name": getattr(v, 'name', None),
+                    "languages": [str(x) for x in (getattr(v, 'languages', []) or [])],
+                    "gender": getattr(v, 'gender', None),
+                    "age": getattr(v, 'age', None),
+                })
+            if out:
+                return {"voices": out}
+        except Exception:
+            pass
+    except Exception:
+        # pyttsx3 import failed; continue to CLI fallback
+        pass
+
+    # Fallback: attempt to list voices from espeak-ng or espeak
+    speak = shutil.which('espeak-ng') or shutil.which('espeak')
+    if speak:
+        try:
+            # espeak-ng --voices prints table; parse names in column 4 (Variant) or 3 (Language) if missing
+            out = subprocess.check_output([speak, '--voices'], stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+            results = []
+            # Skip header lines
+            for ln in lines:
+                if ln.lower().startswith('pty') or ln.lower().startswith('enabled') or ln.lower().startswith('idx'):
+                    continue
+                parts = [p for p in ln.split(' ') if p]
+                # Typical columns: Pty Language Age/Gender VoiceName File ...
+                if len(parts) >= 4:
+                    lang = parts[1]
+                    name = parts[3]
+                    results.append({"id": name, "name": name, "languages": [lang]})
+            return {"voices": results}
+        except Exception:
+            pass
+
+    # Last resort: no voices available; return empty list rather than 500 to keep UI usable
+    return {"voices": [], "note": "No local TTS voice list available (install espeak-ng or ensure pyttsx3 voices)."}
+
+
+@app.post("/ai/voices/preview")
+async def voice_preview(body: Dict[str, Any]):
+    text = (body.get('text') or '').strip() or 'This is a sample voice.'
+    rate = body.get('rate')
+    try:
+        rate = int(rate) if rate is not None else None
+    except Exception:
+        rate = None
+    voice = (body.get('voice') or '').strip() or None
+    try:
+        meta = media_mod.tts_preview(text=text, rate=rate, voice=voice)
+        return {"preview": {"filename": meta.get('filename'), "url": f"/media/{meta.get('filename')}"}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _db_scalar(conn, sql: str) -> int:
+    row = conn.execute(text(sql)).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def seed_profiles_and_jobs():
+    now = datetime.utcnow()
     with engine.begin() as conn:
-        c = conn.execute(text("SELECT id FROM customers WHERE name=:n"), {"n": cust}).fetchone()
-        if not c: raise HTTPException(404, "customer not found")
-        conn.execute(text("""
-            INSERT INTO vm_customers(node,vmid,customer_id)
-            VALUES (:node,:vmid,:cid)
-            ON CONFLICT(node,vmid) DO UPDATE SET customer_id=excluded.customer_id
-        """), {"node":node, "vmid":vmid, "cid":c.id})
-    audit(email, "customer:map_vm", {"node":node,"vmid":vmid,"customer":cust})
-    return {"ok": True}
+        profiles_count = _db_scalar(conn, "SELECT COUNT(*) FROM ai_content_profiles")
+        if profiles_count == 0:
+            samples = [
+                {"name": "Viral Gamer", "tone": "energetic", "voice": "casual", "target_platform": "TikTok · YouTube Shorts", "guidelines": "Hook in 2s, clear beats, strong CTA"},
+                {"name": "Finance Bites", "tone": "authoritative", "voice": "mentor", "target_platform": "Instagram Reels", "guidelines": "No jargon, always add a disclaimer"},
+            ]
+            for s in samples:
+                conn.execute(text(
+                    """
+                    INSERT INTO ai_content_profiles(name, tone, voice, target_platform, guidelines, updated_at)
+                    VALUES (:name, :tone, :voice, :target_platform, :guidelines, :updated_at)
+                    """
+                ), {**s, "updated_at": now})
+        jobs_count = _db_scalar(conn, "SELECT COUNT(*) FROM ai_content_jobs")
+        if jobs_count == 0:
+            # Create one job per sample profile
+            rows = conn.execute(text("SELECT id, name FROM ai_content_profiles ORDER BY id ASC LIMIT 2")).mappings().all()
+            for r in rows:
+                title = f"{r['name']} — First drop"
+                outline = "# Script\n0-2s: Cold open\n2-7s: Hook\n7-20s: Setup\n20-45s: Twist\n45-55s: Payoff\n55-60s: CTA"
+                conn.execute(text(
+                    """
+                    INSERT INTO ai_content_jobs(profile_id, title, content_type, generated_content, status, created_at, updated_at)
+                    VALUES (:pid, :title, 'video-script', :content, 'completed', :now, :now)
+                    """
+                ), {"pid": r['id'], "title": title, "content": outline, "now": now})
 
-# ---------- Uptime Kuma add monitor ----------
-@app.post("/api/kuma/monitor")
-def kuma_monitor(req: Request, payload: dict):
-    uid, email, role = require_user(req)
-    if not KUMA_TOKEN: raise HTTPException(400,"KUMA_TOKEN not set")
-    url = payload["url"]; name = payload.get("name", url)
-    headers = {"Authorization": f"Bearer {KUMA_TOKEN}", "Content-Type":"application/json"}
-    r = httpx.post(f"{KUMA_URL}/api/monitor", headers=headers, json={"type":"http","name":name,"url":url,"interval":60})
-    if r.status_code not in (200,201): raise HTTPException(400, f"kuma err {r.status_code}: {r.text}")
-    audit(email, "kuma:add_monitor", {"url":url,"name":name})
-    return {"ok": True}
 
-# ---------- Admin / Audit ----------
-@app.get("/ui/admin", response_class=HTMLResponse)
-def ui_admin(req: Request):
-    uid, email, role = require_user(req)
-    return render("admin.html", email=email, role=role)
-
-@app.get("/ui/audit", response_class=HTMLResponse)
-def ui_audit(req: Request):
-    uid, email, role = require_user(req)
-    with engine.begin() as conn:
-        rows = conn.execute(text("""
-            SELECT actor_email, action, meta, TO_CHAR(created_at,'YYYY-MM-DD HH24:MI') AS dt
-            FROM audit ORDER BY id DESC LIMIT 200
-        """)).fetchall()
-    return render("audit.html", rows=rows, role=role)
-
-@app.get("/health")
-def health(): return {"ok": True}
+@app.post("/ai/seed")
+async def api_seed_all():
+    try:
+        seed_profiles_and_jobs()
+        bg = media_mod.seed_backgrounds()
+        return {"ok": True, "backgrounds": bg.get("generated", [])}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

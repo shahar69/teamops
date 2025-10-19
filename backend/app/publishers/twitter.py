@@ -69,3 +69,22 @@ def publish(job: Dict[str, Any], schedule: Dict[str, Any]) -> Dict[str, Any]:
             "preview": preview,
         },
     }
+
+
+class TwitterPublisher:
+    REQUIRED_ENV = ["TWITTER_API_KEY", "TWITTER_API_SECRET", "TWITTER_ACCESS_TOKEN", "TWITTER_ACCESS_SECRET"]
+
+    def __init__(self, env: Dict[str, str]):
+        self.env = env
+
+    def health_check(self) -> Dict[str, Any]:
+        missing = [k for k in self.REQUIRED_ENV if not self.env.get(k)]
+        ok = not missing
+        return {"ok": ok, "success": ok, "message": ("Missing: " + ", ".join(missing)) if missing else "ok"}
+
+    def prepare_payload(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        return {"status_text": job.get("text", ""), "media": job.get("media")}
+
+    def publish(self, job: Dict[str, Any], schedule: Dict[str, Any] = None) -> Dict[str, Any]:
+        payload = self.prepare_payload(job)
+        return {"status": "dry_run", "payload": payload}
