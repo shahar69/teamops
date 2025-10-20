@@ -61,6 +61,18 @@ dashboard once the backend is up. The same view now includes a publishing
 schedule board so operators can review upcoming drops and reschedule or cancel
 them without leaving the automation workspace.
 
+### Video Studio
+
+A dedicated video creation interface is available at `/ui/video-studio` with a
+modern, professional workflow for creating short-form videos. Features include:
+- Project-based workflow with status tracking
+- Visual background selection and voice preview
+- Real-time canvas preview
+- Advanced audio controls (music, ducking, volume)
+- Comprehensive subtitle and overlay options
+
+See [`docs/video_studio.md`](docs/video_studio.md) for complete documentation.
+
 ## Additional documentation
 
 * [`docs/PROJECT_OVERVIEW.md`](docs/PROJECT_OVERVIEW.md) – architecture and

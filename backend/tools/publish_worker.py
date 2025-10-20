@@ -17,16 +17,21 @@ from datetime import datetime
 from sqlalchemy import create_engine, text
 
 BASE = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+ROOT = os.path.abspath(os.path.join(BASE, '..'))
 import sys
-sys.path.insert(0, os.path.join(BASE, 'app'))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 
-from main import DATABASE_URL
-from publishers import get_publisher
+from backend.app.main import DATABASE_URL
+from backend.app.publishers import get_publisher
+
+
+from datetime import timezone
 
 
 def main(live: bool = False):
     engine = create_engine(DATABASE_URL)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     now_iso = now.isoformat() + 'Z'
     with engine.begin() as conn:
         rows = conn.execute(text("""
@@ -58,9 +63,9 @@ def main(live: bool = False):
                 # last publish time
                 last = conn.execute(text("SELECT updated_at FROM ai_content_schedules WHERE channel_id=:cid AND status='posted' ORDER BY updated_at DESC LIMIT 1"), {"cid": channel['id']}).fetchone()
                 if last and channel['min_interval_seconds']:
-                    from datetime import datetime
+                    from datetime import datetime, timezone
                     last_dt = last.updated_at
-                    if (datetime.utcnow() - last_dt).total_seconds() < channel['min_interval_seconds']:
+                    if (datetime.now(timezone.utc) - last_dt).total_seconds() < channel['min_interval_seconds']:
                         can_publish = False
             if not can_publish:
                 conn.execute(text("UPDATE ai_content_schedules SET status='scheduled', delivery_meta = COALESCE(delivery_meta, '{}'::jsonb) || :meta::jsonb, updated_at=NOW() WHERE id=:id"), {"id": sid, "meta": json.dumps({"throttled": True, "when": now_iso})})

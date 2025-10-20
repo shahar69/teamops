@@ -1,7 +1,7 @@
 import os
 import uuid
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
@@ -563,5 +563,5 @@ def generate_short(title: str, script: str, *, background_name: str | None = Non
     return {
         'filename': video_name,
         'path': str(video_path),
-        'created_at': datetime.utcnow().isoformat() + 'Z'
+        'created_at': datetime.now(timezone.utc).isoformat() + 'Z'
     }
